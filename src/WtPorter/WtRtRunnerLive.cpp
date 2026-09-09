@@ -2,6 +2,8 @@
 #include "../Includes/WTSTradeDef.hpp"
 #include "../Includes/WTSContractInfo.hpp"
 #include "../Includes/WTSDataDef.hpp"
+#include "../Includes/WTSSessionInfo.hpp"
+#include "../WTSTools/WTSDataFactory.h"
 #include "../Share/BarReplay.hpp"
 #include <deque>
 #include <mutex>
@@ -74,12 +76,16 @@ public:
         if (!contract) throw std::invalid_argument("Controlled runtime requires one known physical contract");
         if ((mode == "paper") != this->trader->supportsPaperControl()) throw std::invalid_argument("Trader does not match the controlled account mode");
         run = text(request, "run_id"); generation = integer(request, "generation");
+        event_ms = integer(request, "event_ms"); received_at = text(request, "received_at");
+        const auto initialDay = readUint32(request, "trading_day");
+        if (!event_ms || received_at.empty()) throw std::invalid_argument("Controlled input origin is required");
         this->trader->configureLive(run, generation, contract->getFullCode(), [this](CommonExecuter action) {
             std::lock_guard<std::mutex> lock{this->callback_mutex}; this->callbacks.push_back(std::move(action));
         });
+        this->trader->stampLiveInput(0, event_ms, received_at, initialDay);
         engine.controlledDecisions(false);
     }
-    ~WtControlledRuntime() { trader->blockLive(); }
+    ~WtControlledRuntime() { trader->blockLive(); if (active_bar) active_bar->release(); }
     void block() { trader->blockLive(); stopping = true; engine.controlledDecisions(false); }
 
     std::string request(const std::string& operation, const std::string& source, const WTSTickStruct* tick, const WTSBarStruct* bar) {
@@ -98,7 +104,9 @@ public:
                 data.controlledBar(code.c_str(), *bar, false);
             } else if (operation == "start") {
                 if (started || !trader->isReady()) throw std::logic_error("Controlled start requires reconciled native account facts");
+                if (integer(d, "event_ms") < event_ms) throw std::invalid_argument("Controlled start precedes its input origin");
                 event_ms = integer(d, "event_ms"); received_at = text(d, "received_at");
+                trader->stampLiveInput(sequence, event_ms, received_at, readUint32(d, "trading_day"));
                 engine.startControlled(readUint32(d, "date"), readUint32(d, "time"), readUint32(d, "trading_day"), event_ms);
                 started = true;
             } else if (operation == "arm") {
@@ -135,6 +143,7 @@ public:
                 step(d, tick, bar);
             } else if (operation != "snapshot") throw std::invalid_argument("Unsupported controlled operation");
             pump();
+            if (operation == "step") trader->recordLiveReport("onInput", nullptr, nullptr);
             if (operation == "snapshot") {
                 rapidjson::StringBuffer buffer; Writer w(buffer); auto state = snapshot(); w.String(state.c_str()); result = buffer.GetString();
             }
@@ -147,6 +156,41 @@ public:
     }
 
 private:
+    void closeActiveBar(uint64_t ms) {
+        if (!active_bar || !active_bar->size()) return;
+        WTSBarStruct closed = *active_bar->at(-1);
+        const auto stamp = closed.time + 199000000000ULL;
+        data.controlledBar(code.c_str(), closed, true);
+        engine.stepControlled(static_cast<uint32_t>(stamp / 10000), static_cast<uint32_t>(stamp % 10000) * 100000, ms);
+        active_bar->release(); active_bar = nullptr;
+    }
+    void aggregateTick(const WTSTickStruct* tick, uint32_t date, uint32_t time, uint64_t ms) {
+        const auto stamp = uint64_t(date) * 10000 + time / 100000;
+        auto session = engine.get_session_info(code.c_str(), true);
+        if (!session) throw std::logic_error("Controlled tick aggregation requires a native session");
+        // Reuse the native bar assignment, including section-end ticks. Keep
+        // only the unfinished bar; closed bars already belong to WtDtMgr.
+        if (tick) {
+            auto release = [](WTSTickData* p) { p->release(); };
+            WTSTickStruct copy = *tick;
+            std::unique_ptr<WTSTickData, decltype(release)> input(WTSTickData::create(copy), release);
+            input->setCode(code.c_str()); input->setContractInfo(contract);
+            auto releaseBars = [](WTSKlineData* p) { p->release(); };
+            std::unique_ptr<WTSKlineData, decltype(releaseBars)> candidate(WTSKlineData::create(code.c_str(), 0), releaseBars);
+            candidate->setPeriod(KP_Minute5, 1);
+            WTSDataFactory factory;
+            factory.updateKlineData(candidate.get(), input.get(), session, true);
+            if (candidate->size()) {
+                // WTSDataFactory's tick path does not assign settlement/reserve;
+                // those fields are explicit zero, never inferred settlement.
+                candidate->at(-1)->settle = 0; candidate->at(-1)->reserve_ = 0;
+                if (active_bar && active_bar->at(-1)->time != candidate->at(-1)->time) closeActiveBar(ms);
+                if (!active_bar) active_bar = candidate.release();
+                else factory.updateKlineData(active_bar, input.get(), session, true);
+            }
+        }
+        if (active_bar && active_bar->at(-1)->time + 199000000000ULL <= stamp) closeActiveBar(ms);
+    }
     void pump() {
         for (;;) {
             if (mode == "paper") paper = paperResult(trader->paperControl("{\"op\":\"query\"}"));
@@ -195,6 +239,7 @@ private:
             throw std::invalid_argument("Settlement input must contain a paper settlement operation");
         if (kind == "begin_day" && mode == "paper" && text(field(d, "day_rules"), "op") != "begin_day")
             throw std::invalid_argument("Trading day input must contain a begin_day operation");
+        trader->stampLiveInput(next, ms, received, day);
         if (mode == "paper") paper = paperResult(trader->paperStep(next, ms, tick, kind == "bar_quote"));
         pump();
         if (kind == "settle") {
@@ -204,6 +249,7 @@ private:
             if (mode == "paper") paper = paperResult(trader->paperControl(json(field(d, "day_rules"))));
             engine.startControlled(date, time, day, ms, false);
         } else {
+            if (kind == "tick" || kind == "clock") aggregateTick(kind == "tick" ? tick : nullptr, date, time, ms);
             if (kind == "bar") data.controlledBar(code.c_str(), *bar, true);
             if (kind == "bar_quote") {
                 // Keep the minute unclosed until its complete bar follows phase 3.
@@ -220,6 +266,14 @@ private:
         }
         if (kind == "bar_quote") { bar_input = std::move(barSource); ++bar_phase; }
         else if (kind == "bar") { bar_input.clear(); bar_phase = 0; }
+        auto clock = parse(engine.liveClockSnapshot());
+        if (field(clock, "ended").GetBool()) {
+            block();
+            if (mode == "paper") {
+                auto expiry = std::string("{\"op\":\"expire_day\",\"trading_day\":") + std::to_string(day) + "}";
+                paper = paperResult(trader->paperControl(expiry));
+            }
+        }
         sequence = next; event_ms = ms; received_at = std::move(received);
     }
     std::string snapshot() const {
@@ -230,6 +284,9 @@ private:
         w.Key("sequence"); w.Uint64(sequence); w.Key("event_ms"); w.Uint64(event_ms); text("received_at", received_at);
         w.Key("stopping"); w.Bool(stopping); text("engine", engine.liveSnapshot()); text("trader", trader->liveSnapshot());
         text("bar_input", bar_input); w.Key("bar_phase"); w.Uint(bar_phase);
+        w.Key("active_bar");
+        if (active_bar) { auto value = barIdentity(*active_bar->at(-1)); w.RawValue(value.c_str(), value.size(), rapidjson::kArrayType); }
+        else w.Null();
         if (mode == "paper") { auto p = parse(paper); text("paper", ::text(p, "state")); }
         else { w.Key("paper"); w.Null(); }
         w.EndObject(); return buffer.GetString();
@@ -241,6 +298,19 @@ private:
         auto received = text(d, "received_at"); const auto& stop = field(d, "stopping");
         if (!stop.IsBool()) throw std::invalid_argument("Invalid controlled stop state");
         auto restoredBar = text(d, "bar_input"); auto restoredPhase = readUint32(d, "bar_phase");
+        const auto& pendingBar = field(d, "active_bar");
+        WTSBarStruct pending{};
+        if (!pendingBar.IsNull()) {
+            if (!pendingBar.IsArray() || pendingBar.Size() != 12 || !pendingBar[0].IsUint() || !pendingBar[1].IsUint64() || !pendingBar[2].IsUint())
+                throw std::invalid_argument("Invalid unfinished native tick bar");
+            pending.date = pendingBar[0].GetUint(); pending.time = pendingBar[1].GetUint64(); pending.reserve_ = pendingBar[2].GetUint();
+            double* fields[] = {&pending.open, &pending.high, &pending.low, &pending.close, &pending.settle, &pending.money, &pending.vol, &pending.hold, &pending.add};
+            for (unsigned i = 0; i != 9; ++i) {
+                if (!pendingBar[i + 3].IsNumber()) throw std::invalid_argument("Invalid unfinished bar field");
+                *fields[i] = pendingBar[i + 3].GetDouble();
+            }
+            barIdentity(pending);
+        }
         if (restoredPhase > 4 || (restoredPhase == 0) != restoredBar.empty())
             throw std::invalid_argument("Invalid pending OHLC checkpoint");
         if (mode == "paper") {
@@ -249,16 +319,29 @@ private:
             paper = paperResult(trader->paperControl(b.GetString()));
         }
         trader->restoreLive(text(d, "trader")); engine.restoreLive(text(d, "engine"));
+        trader->stampLiveInput(restoredSequence, restoredTime, received, engine.getTradingDate());
         sequence = restoredSequence; event_ms = restoredTime; received_at = std::move(received);
         bar_input = std::move(restoredBar); bar_phase = restoredPhase;
+        if (!pendingBar.IsNull()) {
+            active_bar = WTSKlineData::create(code.c_str(), 1); active_bar->setPeriod(KP_Minute5, 1); *active_bar->at(0) = pending;
+        }
         started = true; stopping = true; // Reconciliation and a new arm are mandatory after every restore.
     }
     std::string facts(const std::string& result) const {
         rapidjson::StringBuffer b; Writer w(b);
         w.StartObject(); w.Key("sequence"); w.Uint64(sequence); w.Key("event_ms"); w.Uint64(event_ms);
         w.Key("ready"); w.Bool(trader->isReady()); w.Key("connected"); w.Bool(trader->liveConnected());
+        w.Key("trading_day"); w.Uint(trader->liveTradingDay());
         w.Key("stopping"); w.Bool(stopping); w.Key("reports"); auto reports = trader->liveReports();
         w.RawValue(reports.c_str(), reports.size(), rapidjson::kObjectType);
+        w.Key("commands"); w.StartArray();
+        for (const auto& item : trader->liveCommands()) {
+            w.StartObject(); w.Key("command_id"); w.String(item.first.c_str());
+            w.Key("entrust_id"); w.String(item.second.entrust_id.c_str());
+            w.Key("local_id"); w.Uint(item.second.local_id);
+            w.Key("status"); w.String(item.second.status.c_str()); w.EndObject();
+        }
+        w.EndArray();
         w.Key("paper"); if (paper.empty()) w.Null(); else w.RawValue(paper.c_str(), paper.size(), rapidjson::kObjectType);
         w.Key("result"); rapidjson::Document value; value.Parse(result.c_str()); value.Accept(w);
         w.EndObject(); return b.GetString();
@@ -272,6 +355,7 @@ private:
     std::deque<CommonExecuter> callbacks;
     std::string mode, code, run, paper, received_at;
     std::string bar_input;
+    WTSKlineData* active_bar = nullptr;
     uint32_t bar_phase = 0;
     uint64_t generation = 0, sequence = 0, event_ms = 0;
     bool consuming = false, failed = false, started = false, connected = false;

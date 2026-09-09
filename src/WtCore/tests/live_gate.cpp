@@ -99,6 +99,7 @@ public:
         plugin.before_id = {};
         auto order = WTSOrderInfo::create(entrust);
         order->setContractInfo(contract); order->setOrderID("owned-order");
+        order->setCode(contract->getCode());
         order->setEntrustID(trader.liveCommands().at("one").entrust_id.c_str());
         order->setOrderState(WOS_NotTraded_Queuing);
         trader._orders = OrderMap::create(); trader._orders->add(local, order, false);
@@ -116,6 +117,12 @@ public:
         restarted._trader_api = &plugin; restarted._order_pattern = "otp.test";
         restarted.configureLive("run-two", 5, "TEST.test1", queue);
         restarted.restoreLive(checkpoint);
+        order->setUserTag("");
+        check(restarted.liveOrderId(order) == local, "restored owned order resolves without the broker plugin tag cache");
+        order->setEntrustID("external-entrust");
+        order->setUserTag(("otp.test." + std::to_string(local)).c_str());
+        check(restarted.liveOrderId(order) == 0, "an external order cannot claim ownership through a copied tag");
+        order->setEntrustID(trader.liveCommands().at("one").entrust_id.c_str());
         check(restarted.liveSnapshot() == checkpoint && !restarted._live_enabled && !restarted._live_connected,
               "command restore preserves facts but not authority");
         check(restarted.liveReports() == outbox, "unacknowledged raw reports retain their original source after restart");

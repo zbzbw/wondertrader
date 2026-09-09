@@ -23,9 +23,11 @@ void lifecycle() {
     PaperAccount a(r, 1000000, price(100));
     a.reserve("long", false, PaperAccount::Open, 4, price(100));
     check(a.balance().frozen_margin == 48000 && a.balance().frozen_fee == 800);
+    check(a.balance().gross_exposure == 400000 && a.balance().daily_loss == 0);
     a.fill("long", 2, price(100));
     check(a.balance().cash == 999600 && a.balance().margin == 20000);
     check(a.balance().deposit == 1000000 && a.balance().day_fees == 400);
+    check(a.balance().gross_exposure == 400000 && a.balance().daily_loss == 400);
     check(a.balance().frozen_margin == 24000 && a.balance().frozen_fee == 400);
     auto restored = PaperAccount::restore(a.snapshot());
     check(restored.snapshot() == a.snapshot());
@@ -38,6 +40,7 @@ void lifecycle() {
     check(restored.snapshot() == a.snapshot());
     check(a.balance().cash == 999400 && a.balance().unrealized == 10000);
     check(a.balance().margin == 44000 && a.balance().frozen_margin == 0);
+    check(a.balance().gross_exposure == 330000 && a.balance().daily_loss == 0);
     auto before = a.snapshot();
     rejects([&] { a.reserve("huge", false, PaperAccount::Open, 1000, price(100)); });
     rejects([&] { a.reserve("wrong", false, PaperAccount::Yesterday, 1, price(100)); });
@@ -45,6 +48,12 @@ void lifecycle() {
     rejects([&] { a.begin_day(tomorrow, price(110)); });
     check(a.snapshot() == before);
     a.reserve("day-order", false, PaperAccount::Open, 1, price(90));
+    auto cashBeforeSettlement = a.balance().cash;
+    a.expire_day(r.trading_day);
+    check(a.orders().at("day-order").status == "expired" && a.balance().frozen_margin == 0);
+    check(a.balance().cash == cashBeforeSettlement && !a.settled());
+    rejects([&] { a.begin_day(tomorrow, price(110)); });
+    a = PaperAccount::restore(a.snapshot());
     a.settle(r.trading_day, price(110));
     check(a.balance().cash == 1009400 && a.balance().unrealized == 0);
     check(a.position(false, PaperAccount::Yesterday, true) == 2);

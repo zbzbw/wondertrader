@@ -1119,6 +1119,13 @@ void TraderMocker::controlled_settle(uint32_t trading_day, int64_t official_pric
 {
 	controlled_barrier();
 	_paper->settle(trading_day, official_price);
+	controlled_expire_day(trading_day);
+}
+
+void TraderMocker::controlled_expire_day(uint32_t trading_day)
+{
+	controlled_barrier();
+	_paper->expire_day(trading_day);
 	if (!_orders) return;
 	_draining = true;
 	try
@@ -1127,7 +1134,7 @@ void TraderMocker::controlled_settle(uint32_t trading_day, int64_t official_pric
 	{
 		auto order = static_cast<WTSOrderInfo*>(_orders->at(index));
 		if (!_awaits->get(order->getOrderID())) continue;
-		order->setOrderState(WOS_Canceled); order->setStateMsg("DAY expired at settlement");
+		order->setOrderState(WOS_Canceled); order->setStateMsg("DAY expired");
 		_awaits->remove(order->getOrderID());
 		if (_listener) _listener->onPushOrder(order);
 	}

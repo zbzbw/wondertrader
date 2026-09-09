@@ -41,8 +41,9 @@ public:
         int64_t frozen_margin = 0, frozen_fee = 0, fees = 0;
         int64_t realized = 0, unrealized = 0;
         int64_t pre_balance = 0, deposit = 0, day_fees = 0, day_realized = 0;
+        int64_t gross_exposure = 0, daily_loss = 0;
     };
-    struct PositionAmounts { int64_t quantity = 0, cost = 0, margin = 0, unrealized = 0; };
+    struct PositionAmounts { int64_t quantity = 0, cost = 0, margin = 0, unrealized = 0, average_price = 0; };
 
     PaperAccount(Rules rules, int64_t initial_cash, int64_t mark);
     void reserve(const std::string& order_id, bool short_side, Offset offset,
@@ -51,9 +52,10 @@ public:
     void cancel(const std::string& order_id);
     void mark(int64_t price);
     void settle(uint32_t day, int64_t official_price);
+    void expire_day(uint32_t day);
     void begin_day(Rules rules, int64_t mark);
     Balance balance() const;
-    PositionAmounts position_amounts(bool short_side) const;
+    PositionAmounts position_amounts(bool short_side, Offset bucket = Open) const;
     int64_t position(bool short_side, Offset bucket, bool available) const;
     const std::map<std::string, Order>& orders() const { return _orders; }
     const std::vector<Lot>& lots() const { return _lots; }

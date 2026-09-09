@@ -65,10 +65,21 @@ void TraderAdapter::recordLiveReport(const char* kind, const WTSObject* payload,
     if (_live_report_seq == UINT64_MAX) throw std::overflow_error("Native report sequence exhausted");
     rapidjson::StringBuffer buffer; Writer w(buffer);
     w.StartObject(); w.Key("sequence"); w.Uint64(_live_report_seq + 1);
+    w.Key("input_sequence"); w.Uint64(_live_input_seq);
+    w.Key("event_ms"); if (_live_event_ms) w.Uint64(_live_event_ms); else w.Null();
+    w.Key("trading_day"); if (liveTradingDay()) w.Uint(liveTradingDay()); else w.Null();
+    w.Key("received_at"); if (_live_received_at.empty() || _live_arrival_ms) w.Null(); else w.String(_live_received_at.c_str());
+    w.Key("received_at_ms"); if (_live_arrival_ms) w.Uint64(_live_arrival_ms); else w.Null();
     w.Key("kind"); w.String(kind); w.Key("payload"); writeRecord(w, payload);
     w.Key("error"); writeRecord(w, error); w.EndObject();
     _live_reports.emplace(_live_report_seq + 1, buffer.GetString()); ++_live_report_seq;
     if (_live_report) _live_report(kind, payload, error);
+    if (std::strcmp(kind, "onRspTrades") == 0 && payload) {
+        // A broker's complete trade query contains multiple fills. Give each
+        // native fact its own source sequence while retaining the original batch.
+        auto trades = dynamic_cast<const WTSArray*>(payload);
+        if (trades) for (auto trade : *trades) recordLiveReport("onTradeFact", trade, nullptr);
+    }
 }
 
 std::string TraderAdapter::liveReports() const {

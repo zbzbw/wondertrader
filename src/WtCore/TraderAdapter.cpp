@@ -1430,6 +1430,11 @@ void TraderAdapter::handleEvent(WTSTraderEvent e, int32_t ec)
 {
 	if (e == WTE_Close || ec != 0) { _live_connected = false; blockLive(); }
 	if (liveDeferred()) { deferLive([this, e, ec]() { handleEvent(e, ec); }); return; }
+	if (_live_controlled) {
+		auto error = WTSError::create(static_cast<WTSErroCode>(ec), e == WTE_Close ? "disconnected" : "connection event");
+		recordLiveReport(e == WTE_Close ? "onDisconnect" : "onConnection", nullptr, error);
+		error->release();
+	}
 	if(e == WTE_Connect)
 	{
 		if(ec == 0)
@@ -1737,12 +1742,11 @@ void TraderAdapter::onRspOrders(const WTSArray* ayOrders)
 			if (!orderInfo->isAlive())
 				continue;
 
-			if (!StrUtil::startsWith(orderInfo->getUserTag(), _order_pattern.c_str(), true))
-				continue;;
-
-			char* userTag = (char*)orderInfo->getUserTag();
-			userTag += _order_pattern.size() + 1;
-			uint32_t localid = convert::to_uint32(userTag);
+			uint32_t localid = 0;
+			if (_live_controlled) localid = liveOrderId(orderInfo);
+			else if (StrUtil::startsWith(orderInfo->getUserTag(), _order_pattern.c_str(), true))
+				localid = convert::to_uint32(orderInfo->getUserTag() + _order_pattern.size() + 1);
+			if (!localid) continue;
 
 			{
 				SpinLock lock(_mtx_orders);
@@ -2135,12 +2139,15 @@ void TraderAdapter::onPushOrder(WTSOrderInfo* orderInfo)
 	uint32_t localid = 0;
 
 	//先看看是不是wt发出去的单子
-	if (StrUtil::startsWith(orderInfo->getUserTag(), _order_pattern.c_str(), true))
+	if (_live_controlled) localid = liveOrderId(orderInfo);
+	else if (StrUtil::startsWith(orderInfo->getUserTag(), _order_pattern.c_str(), true))
 	{
 		char* userTag = (char*)orderInfo->getUserTag();
 		userTag += _order_pattern.size() + 1;
 		localid = convert::to_uint32(userTag);
-
+	}
+	if (localid)
+	{
 		//如果订单撤销, 并且是wt的订单, 则要先更新未完成数量
 		if (orderInfo->getOrderState() == WOS_Canceled )
 		{

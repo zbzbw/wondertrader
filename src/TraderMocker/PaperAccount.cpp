@@ -133,34 +133,42 @@ PaperAccount::Balance PaperAccount::balance() const
     result.pre_balance = _pre_balance; result.deposit = _deposit;
     result.day_fees = narrow(Integer(_fees) - _fees_at_day_start);
     result.day_realized = narrow(Integer(_realized) - _realized_at_day_start);
-    Integer used = 0, pnl = 0, frozenMargin = 0, frozenFee = 0;
+    Integer used = 0, pnl = 0, frozenMargin = 0, frozenFee = 0, exposure = 0;
     for (const auto& lot : _lots)
     {
         used += margin(lot.short_side, lot.quantity, _mark);
+        exposure += Integer(_mark) * lot.quantity * _rules.multiplier;
         pnl += rounded((Integer(_mark) - lot.basis) * lot.quantity * _rules.multiplier * (lot.short_side ? -1 : 1), 10000);
     }
     for (const auto& entry : _orders)
     {
         frozenMargin += entry.second.frozen_margin;
         frozenFee += entry.second.frozen_fee;
+        if (entry.second.offset == Open && entry.second.status == "open")
+            exposure += Integer(entry.second.limit_price) * entry.second.remaining * _rules.multiplier;
     }
     result.margin = narrow(used); result.unrealized = narrow(pnl);
     result.frozen_margin = narrow(frozenMargin); result.frozen_fee = narrow(frozenFee);
     result.equity = narrow(Integer(_cash) + pnl);
     result.available = narrow(Integer(result.equity) - used - frozenMargin - frozenFee);
+    result.gross_exposure = rounded(exposure, 10000, true);
+    Integer loss = Integer(_pre_balance) + _deposit - result.equity;
+    result.daily_loss = loss > 0 ? narrow(loss) : 0;
     return result;
 }
 
-PaperAccount::PositionAmounts PaperAccount::position_amounts(bool short_side) const
+PaperAccount::PositionAmounts PaperAccount::position_amounts(bool short_side, Offset bucket) const
 {
     Integer quantity = 0, cost = 0, used = 0, pnl = 0;
-    for (const auto& lot : _lots) if (lot.short_side == short_side) {
+    for (const auto& lot : _lots) if (lot.short_side == short_side
+        && (bucket == Open || (lot.opened_day == _rules.trading_day && !settled() ? Today : Yesterday) == bucket)) {
         quantity += lot.quantity;
         cost += Integer(lot.basis) * lot.quantity * _rules.multiplier;
         used += margin(short_side, lot.quantity, _mark);
         pnl += rounded((Integer(_mark) - lot.basis) * lot.quantity * _rules.multiplier * (short_side ? -1 : 1), 10000);
     }
-    return {narrow(quantity), rounded(cost, 10000), narrow(used), narrow(pnl)};
+    return {narrow(quantity), rounded(cost, 10000), narrow(used), narrow(pnl),
+            quantity == 0 ? 0 : rounded(cost, quantity * _rules.multiplier)};
 }
 
 void PaperAccount::reserve(const std::string& id, bool short_side, Offset offset,
@@ -250,6 +258,17 @@ void PaperAccount::mark(int64_t price)
     *this = std::move(next);
 }
 
+void PaperAccount::expire_day(uint32_t day)
+{
+    require(day == _rules.trading_day, "DAY expiry trading day mismatch");
+    for (auto& entry : _orders)
+        if (entry.second.status == "open")
+        {
+            entry.second.status = "expired";
+            entry.second.frozen_margin = entry.second.frozen_fee = 0;
+        }
+}
+
 void PaperAccount::settle(uint32_t day, int64_t official_price)
 {
     if (day == _settled_day)
@@ -265,12 +284,7 @@ void PaperAccount::settle(uint32_t day, int64_t official_price)
     next._cash = narrow(Integer(next._cash) + pnl);
     next._realized = narrow(Integer(next._realized) + pnl);
     for (auto& lot : next._lots) lot.basis = official_price;
-    for (auto& entry : next._orders)
-        if (entry.second.status == "open")
-        {
-            entry.second.status = "expired";
-            entry.second.frozen_margin = entry.second.frozen_fee = 0;
-        }
+    next.expire_day(day);
     next._settled_day = day; next._settlement_price = official_price;
     next.balance();
     *this = std::move(next);

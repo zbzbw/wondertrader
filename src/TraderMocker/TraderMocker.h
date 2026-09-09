@@ -35,6 +35,7 @@ public:
 	void controlled_step(uint64_t input_seq, uint64_t event_ms, WTSTickData* tick, bool shared_liquidity = false);
 	void controlled_barrier();
 	void controlled_settle(uint32_t trading_day, int64_t official_price);
+	void controlled_expire_day(uint32_t trading_day);
 	void controlled_begin_day(PaperAccount::Rules rules, int64_t mark);
 	std::string controlled_snapshot();
 	void controlled_restore(const std::string& state);

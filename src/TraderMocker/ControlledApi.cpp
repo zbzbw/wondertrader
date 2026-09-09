@@ -30,6 +30,7 @@ std::string TraderMocker::controlled_request(const std::string& request)
     require(!doc.HasParseError() && doc.IsObject());
     auto operation = text(doc, "op");
     if (operation == "restore") controlled_restore(text(doc, "state"));
+    else if (operation == "expire_day") controlled_expire_day(small(doc, "trading_day"));
     else if (operation == "settle")
         controlled_settle(small(doc, "trading_day"), PaperAccount::scaled_decimal(text(doc, "price"), 6));
     else if (operation == "begin_day") {
@@ -70,7 +71,30 @@ std::string TraderMocker::controlled_request(const std::string& request)
     money("fees", balance.fees); money("realized", balance.realized); money("unrealized", balance.unrealized);
     money("pre_balance", balance.pre_balance); money("deposit", balance.deposit);
     money("day_fees", balance.day_fees); money("day_realized", balance.day_realized);
-    out.EndObject(); out.EndObject();
+    money("gross_exposure", balance.gross_exposure); money("daily_loss", balance.daily_loss);
+    out.EndObject();
+    const auto& rules = _paper->rules();
+    auto decimal = [&](const char* key, int64_t value, unsigned places) {
+        out.Key(key); auto text = PaperAccount::decimal_string(value, places); out.String(text.c_str());
+    };
+    out.Key("rules"); out.StartObject();
+    out.Key("contract"); out.String(rules.contract.c_str()); out.Key("source"); out.String(rules.source.c_str());
+    out.Key("trading_day"); out.Uint(rules.trading_day);
+    decimal("multiplier", rules.multiplier, 0); decimal("tick_size", rules.tick, 6);
+    decimal("lower_limit", rules.lower_limit, 6); decimal("upper_limit", rules.upper_limit, 6);
+    out.EndObject();
+    out.Key("positions"); out.StartArray();
+    for (bool shortSide : {false, true}) for (auto bucket : {PaperAccount::Today, PaperAccount::Yesterday}) {
+        auto amounts = _paper->position_amounts(shortSide, bucket);
+        out.StartObject(); out.Key("side"); out.String(shortSide ? "short" : "long");
+        out.Key("holding_bucket"); out.String(bucket == PaperAccount::Today ? "today" : "yesterday");
+        decimal("quantity", amounts.quantity, 0); decimal("available_quantity", _paper->position(shortSide, bucket, true), 0);
+        out.Key("average_price");
+        if (!amounts.quantity) out.Null(); else { auto price = PaperAccount::decimal_string(amounts.average_price, 6); out.String(price.c_str()); }
+        decimal("cost", amounts.cost, 2); decimal("margin", amounts.margin, 2); decimal("unrealized", amounts.unrealized, 2);
+        out.EndObject();
+    }
+    out.EndArray(); out.EndObject();
     return std::string(buffer.GetString(), buffer.GetSize());
 }
 

@@ -1,6 +1,7 @@
 #include "TraderAdapter.h"
 #include "../Includes/WTSTradeDef.hpp"
 #include "../Includes/WTSContractInfo.hpp"
+#include "../Share/TimeUtils.hpp"
 #include <cmath>
 #include <stdexcept>
 #include <rapidjson/document.h>
@@ -35,13 +36,21 @@ bool TraderAdapter::liveDeferred()
 
 void TraderAdapter::deferLive(CommonExecuter action)
 {
-    _live_queue([this, action = std::move(action)]() {
+    const uint64_t arrival = supportsPaperControl() ? 0 : TimeUtils::getLocalTimeNow();
+    _live_queue([this, arrival, action = std::move(action)]() {
         liveIdentity(_live_run, _live_generation);
+        _live_arrival_ms = arrival;
         _live_dispatching = true;
         try { action(); }
         catch (...) { _live_dispatching = false; throw; }
         _live_dispatching = false;
     });
+}
+
+void TraderAdapter::stampLiveInput(uint64_t sequence, uint64_t event_ms, const std::string& received_at, uint32_t trading_day)
+{
+    liveIdentity(_live_run, _live_generation);
+    _live_input_seq = sequence; _live_event_ms = event_ms; _live_received_at = received_at; _live_trading_day = trading_day;
 }
 
 std::shared_ptr<WTSObject> TraderAdapter::copyLive(const WTSObject* value)
@@ -165,6 +174,15 @@ bool TraderAdapter::cancelLive(const std::string& run, uint64_t generation,
     catch (...) { _live_cancel_local = UINT32_MAX; throw; }
     _live_cancel_local = UINT32_MAX;
     return result.second;
+}
+
+uint32_t TraderAdapter::liveOrderId(const WTSOrderInfo* order) const
+{
+    if (std::string(order->getExchg()) + "." + order->getCode() != _live_contract) return 0;
+    for (const auto& entry : _live_commands)
+        if (entry.second.entrust_id == order->getEntrustID() && entry.second.local_id != UINT32_MAX)
+            return entry.second.local_id;
+    return 0;
 }
 
 std::string TraderAdapter::liveSnapshot() const

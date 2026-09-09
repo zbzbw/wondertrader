@@ -87,7 +87,8 @@ def child(porter, mocker, directory, restore=None, scenario="tick"):
     dll.config_porter(encoded(config), False)
     dll.create_cta_context(b"cross", 0)
     identity = dict(run_id="restored" if restore else "original", generation=2 if restore else 1)
-    call("configure", encoded(dict(mode="paper", instrument_id="SHFE.rb.2609", trader_id="paper", **identity)))
+    call("configure", encoded(dict(mode="paper", instrument_id="SHFE.rb.2609", trader_id="paper",
+                                   event_ms=1, received_at="synthetic:1", trading_day=20260909, **identity)))
     if restore:
         call("restore", restore.read_bytes())
     connected = call("connect")
