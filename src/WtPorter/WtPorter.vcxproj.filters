@@ -24,6 +24,12 @@
     <ClCompile Include="WtRtRunner.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
+    <ClCompile Include="WtRtRunnerLive.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="WtLivePorter.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
     <ClCompile Include="ExpCtaContext.cpp">
       <Filter>源文件</Filter>
     </ClCompile>

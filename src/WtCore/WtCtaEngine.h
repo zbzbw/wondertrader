@@ -28,6 +28,12 @@ public:
 	void stepControlled(uint32_t date, uint32_t time, uint64_t event_ms);
 	std::string liveClockSnapshot() const;
 	void restoreLiveClock(const std::string& state);
+	std::string liveSnapshot() const;
+	void restoreLive(const std::string& state);
+	void controlledDecisions(bool enabled) { _controlled_decisions = enabled; }
+
+private:
+	std::atomic<bool> _controlled_decisions{true};
 
 public:
 	//////////////////////////////////////////////////////////////////////////

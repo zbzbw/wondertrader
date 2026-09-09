@@ -63,7 +63,7 @@ void WtEngine::set_date_time(uint32_t curDate, uint32_t curTime, uint32_t curSec
 	_cur_time = curTime;
 	_cur_secs = curSecs;
 
-	if (rawTime == 0)
+	if (rawTime == 0 && !_controlled)
 		rawTime = curTime;
 
 	_cur_raw_time = rawTime;

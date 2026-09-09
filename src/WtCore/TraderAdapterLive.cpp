@@ -19,6 +19,8 @@ void TraderAdapter::configureLive(const std::string& run, uint64_t generation, c
     _live_source = run;
     _live_queue = std::move(queue);
     _live_enabled = false;
+    // Paper restore needs the immutable contract catalogue before connection.
+    if (_trader_api) _trader_api->registerSpi(this);
 }
 
 bool TraderAdapter::liveDeferred()
@@ -284,4 +286,11 @@ int TraderAdapter::queryLiveFacts()
     if (_live_enabled || !_live_connected) throw std::logic_error("Reconciliation requires blocked connected trader");
     _state = AS_LOGINED;
     return _trader_api->queryPositions(); // Existing end callbacks chain orders, trades and account.
+}
+
+std::string TraderAdapter::paperStep(uint64_t sequence, uint64_t event_ms, const WTSTickStruct* tick, bool shared_liquidity)
+{
+    liveIdentity(_live_run, _live_generation);
+    if (!supportsPaperControl()) throw std::logic_error("Controlled TraderMocker step ABI 1 is required");
+    return _mocker_step(_trader_api, sequence, event_ms, tick, shared_liquidity ? 1 : 0);
 }

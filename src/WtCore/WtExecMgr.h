@@ -9,6 +9,7 @@ typedef std::function<void(ExecCmdPtr)> EnumExecuterCb;
 
 class WtExecuterMgr : private boost::noncopyable
 {
+	friend class WtCtaEngine;
 public:
 	WtExecuterMgr():_filter_mgr(NULL){}
 

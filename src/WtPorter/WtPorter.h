@@ -15,6 +15,22 @@
 extern "C"
 {
 #endif
+	// UTF-8 JSON responses remain valid until the next controlled ABI call on
+	// this thread. Tick/bar pointers are borrowed only for the duration of step.
+	EXPORT_FLAG uint32_t wt_live_abi();
+	EXPORT_FLAG const char* wt_live_configure(const char* request);
+	EXPORT_FLAG const char* wt_live_connect();
+	EXPORT_FLAG const char* wt_live_start(const char* request);
+	EXPORT_FLAG const char* wt_live_warmup(const WTSBarStruct* bar);
+	EXPORT_FLAG const char* wt_live_step(const char* request, const WTSTickStruct* tick, const WTSBarStruct* bar);
+	EXPORT_FLAG const char* wt_live_snapshot();
+	EXPORT_FLAG const char* wt_live_restore(const char* state);
+	EXPORT_FLAG const char* wt_live_arm(const char* request);
+	EXPORT_FLAG const char* wt_live_submit(const char* request);
+	EXPORT_FLAG const char* wt_live_cancel(const char* request);
+	EXPORT_FLAG const char* wt_live_query(const char* request);
+	EXPORT_FLAG const char* wt_live_ack(const char* request);
+	EXPORT_FLAG void wt_live_block();
 	EXPORT_FLAG	void		register_evt_callback(FuncEventCallback cbEvt);
 
 	EXPORT_FLAG	void		register_cta_callbacks(FuncStraInitCallback cbInit, FuncStraTickCallback cbTick, FuncStraCalcCallback cbCalc, FuncStraBarCallback cbBar, FuncSessionEvtCallback cbSessEvt, FuncStraCondTriggerCallback cbCondTrigger = NULL);

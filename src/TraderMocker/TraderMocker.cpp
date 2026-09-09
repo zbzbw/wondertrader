@@ -401,7 +401,7 @@ int32_t TraderMocker::match_once()
 					else
 					{
 						uPrice = curTick->bidprice(0);
-						uVolume = bidLeft;
+						uVolume = _shared_liquidity ? askLeft : bidLeft;
 					}
 
 					if (decimal::eq(uVolume, 0))
@@ -457,7 +457,7 @@ int32_t TraderMocker::match_once()
 						//更新订单数据
 						ordInfo->setVolLeft(ordInfo->getVolLeft() - curVol);
 						ordInfo->setVolTraded(ordInfo->getVolTraded() + curVol);
-						(isBuy ? askLeft : bidLeft) -= curVol;
+						(isBuy || _shared_liquidity ? askLeft : bidLeft) -= curVol;
 						if (decimal::eq(ordInfo->getVolLeft(), 0))
 						{
 							ordInfo->setOrderState(WOS_AllTraded);
@@ -718,7 +718,7 @@ void TraderMocker::registerSpi(ITraderSpi *listener)
 {
 	_listener = listener;
 
-	_bd_mgr = listener->getBaseDataMgr();
+	_bd_mgr = listener ? listener->getBaseDataMgr() : nullptr;
 }
 
 void TraderMocker::reconn_udp()
@@ -1067,11 +1067,14 @@ void TraderMocker::controlled_barrier()
 	_draining = false;
 }
 
-void TraderMocker::controlled_step(uint64_t input_seq, uint64_t event_ms, WTSTickData* tick)
+void TraderMocker::controlled_step(uint64_t input_seq, uint64_t event_ms, WTSTickData* tick, bool shared_liquidity)
 {
 	controlled_owner();
 	if (_draining || !_controlled_connected || input_seq != _input_seq + 1 || event_ms == 0 || event_ms < _event_ms)
 		throw std::invalid_argument("Invalid controlled event sequence, time or connection");
+	if (shared_liquidity && (!tick || tick->askqty(0) != tick->bidqty(0)
+		|| tick->askprice(0) != tick->bidprice(0) || tick->price() != tick->askprice(0)))
+		throw std::invalid_argument("Bar simulation requires one shared price and quantity");
 	if (tick)
 	{
 		if (_paper->settled() || tick->tradingdate() != _paper->rules().trading_day
@@ -1093,6 +1096,7 @@ void TraderMocker::controlled_step(uint64_t input_seq, uint64_t event_ms, WTSTic
 	}
 	_event_ms = event_ms;
 	controlled_barrier(); // Orders from the preceding event enter before this quote.
+	_shared_liquidity = shared_liquidity;
 	_draining = true;
 	try
 	{
@@ -1106,7 +1110,8 @@ void TraderMocker::controlled_step(uint64_t input_seq, uint64_t event_ms, WTSTic
 		}
 		_input_seq = input_seq;
 	}
-	catch (...) { _draining = false; throw; }
+	catch (...) { _shared_liquidity = false; _draining = false; throw; }
+	_shared_liquidity = false;
 	_draining = false;
 }
 

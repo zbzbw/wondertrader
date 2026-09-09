@@ -1140,12 +1140,14 @@ void WtRtRunner::handleLogAppend(WTSLogLevel ll, const char* msg)
 
 void WtRtRunner::release()
 {
+	blockControlled();
 	//置退出标记, 同步模式下run()内的等待循环得以返回
 	_to_exit = true;
 
 	//停止行情/交易适配器(内部线程由各API自行管理)
 	_parsers.release();
 	_traders.release();
+	_controlled_runtime.reset();
 
 	//停止引擎内部ticker与任务线程
 	if (_engine)

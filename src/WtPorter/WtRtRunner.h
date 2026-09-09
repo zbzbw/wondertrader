@@ -40,6 +40,7 @@ class WtDataStorage;
 NS_WTP_END
 
 USING_NS_WTP;
+class WtControlledRuntime;
 
 typedef enum tagEngineType
 {
@@ -80,6 +81,8 @@ public:
 	void run(bool bAsync = false);
 
 	void release();
+	std::string controlledRequest(const char* operation, const char* request, const WTSTickStruct* tick = nullptr, const WTSBarStruct* bar = nullptr);
+	void blockControlled();
 
 	void registerCtaCallbacks(FuncStraInitCallback cbInit, FuncStraTickCallback cbTick, FuncStraCalcCallback cbCalc, FuncStraBarCallback cbBar, FuncSessionEvtCallback cbSessEvt, FuncStraCondTriggerCallback cbCondTrigger = NULL);
 	void registerSelCallbacks(FuncStraInitCallback cbInit, FuncStraTickCallback cbTick, FuncStraCalcCallback cbCalc, FuncStraBarCallback cbBar, FuncSessionEvtCallback cbSessEvt);
@@ -267,5 +270,6 @@ private:
 	FuncReadBars	_feeder_bars;
 	FuncReadFactors	_feeder_fcts;
 	StdUniqueMutex	_feed_mtx;
+	std::shared_ptr<WtControlledRuntime> _controlled_runtime;
 };
 

@@ -198,6 +198,7 @@ bool TraderAdapter::init(const char* id, WTSVariant* params, IBaseDataMgr* bdMgr
 
 	_remover = (FuncDeleteTrader)DLLHelper::get_symbol(hInst, "deleteTrader");
 	_mocker_live = reinterpret_cast<MockerControl>(DLLHelper::get_symbol(hInst, "wt_mocker_live"));
+	_mocker_step = reinterpret_cast<MockerStep>(DLLHelper::get_symbol(hInst, "wt_mocker_step"));
 	auto mockerAbi = reinterpret_cast<uint32_t (*)()>(DLLHelper::get_symbol(hInst, "wt_mocker_live_abi"));
 	if (_mocker_live && mockerAbi) _mocker_version = mockerAbi();
 

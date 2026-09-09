@@ -1,5 +1,8 @@
 #include "../WtCtaEngine.h"
 #include "../WtDtMgr.h"
+#include "../CtaStraBaseCtx.h"
+#include "../../Includes/WTSDataDef.hpp"
+#include "../../Includes/WTSRiskDef.hpp"
 #include "../../WTSTools/WTSBaseDataMgr.h"
 #include "../../WTSUtils/WTSCfgLoader.h"
 #include "../../Includes/WTSVariant.hpp"
@@ -30,6 +33,24 @@ public:
         push_task([&] { executed = true; });
         return executed && !_thrd_task && _task_queue.empty();
     }
+    void seed(uint32_t context) {
+        auto p = std::make_shared<PosInfo>(); p->_volume = 1; p->_closeprofit = 2; p->_dynprofit = 3;
+        DetailInfo detail; detail._long = true; detail._price = 3500; detail._volume = 1;
+        detail._opentime = 202609112100ULL; detail._opentdate = 20260914; detail._profit = 3;
+        p->_details.push_back(detail); _pos_map["SHFE.rb.2609"] = p;
+        _sig_map["SHFE.rb.2609"]._volume = 1; _sig_map["SHFE.rb.2609"]._gentime = 202609112100ULL;
+        _price_map["SHFE.rb.2609"] = 3500; _factors_cache["SHFE.rb.2609"] = 1;
+        _tick_sub_map["SHFE.rb.2609"][context] = std::make_pair(context, 0);
+        _port_fund->fundInfo()._balance = 10000; _port_fund->fundInfo()._fees = 1;
+    }
+    bool subscribed(uint32_t context) const { return _tick_sub_map.at("SHFE.rb.2609").count(context) == 1; }
+    bool emptyState() const { return _pos_map.empty() && _sig_map.empty() && !_ready && _controlled_time == 0; }
+};
+class Context : public CtaStraBaseCtx {
+public:
+    Context(WtCtaEngine* engine) : CtaStraBaseCtx(engine, "cross", 0) {}
+    void on_calculate(uint32_t, uint32_t) override {}
+    void on_bar_close(const char*, const char*, WTSBarStruct*) override {}
 };
 void configure(Engine& engine, WtDtMgr& data, WTSBaseDataMgr& base, const char* session) {
     const std::string json = std::string("{\"controlled\":true,\"poolsize\":0,\"product\":{\"session\":\"") + session + "\"}}";
@@ -77,10 +98,32 @@ int main() {
         night.startControlled(20260911, 235900000, 20260914, 1);
         night.stepControlled(20260912, 0, 2);
         check(nightEvents.closes.back() == 202609120000ULL, "midnight close must advance civil date once");
+        check(night.get_raw_time() == 0 && night.get_min_time() == 1, "midnight raw time must remain distinct from the next bar minute");
         night.stepControlled(20260914, 90000000, 3);
         check(nightEvents.closes.back() == 202609120230ULL, "weekend gap after midnight preserves Saturday night close");
         auto parallel = WTSCfgLoader::load_from_content(R"({"controlled":true,"poolsize":1})");
         Engine invalid; rejects([&] { invalid.init(parallel, &base, &data, nullptr, nullptr); }); parallel->release();
+        WtDtMgr completeData; Engine complete; configure(complete, completeData, base, "rb");
+        auto context = std::make_shared<Context>(&complete); complete.addContext(context);
+        WTSBarStruct bar; bar.date = 20260911; bar.time = 3609112100ULL;
+        bar.open = 3500; bar.high = 3510; bar.low = 3490; bar.close = 3505; bar.vol = 17;
+        completeData.controlledBar("SHFE.rb.2609", bar, false);
+        complete.startControlled(20260911, 210000000, 20260914, 10); complete.seed(context->id());
+        const auto allState = complete.liveSnapshot();
+        WtDtMgr nextData; Engine next; configure(next, nextData, base, "rb");
+        auto nextContext = std::make_shared<Context>(&next); next.addContext(nextContext); next.restoreLive(allState);
+        check(next.liveSnapshot() == allState && next.subscribed(nextContext->id()), "joint engine restore remaps context subscriptions and preserves all component state");
+        auto latest = nextData.get_kline_slice("SHFE.rb.2609", KP_Minute5, 1, 1);
+        check(latest && latest->at(0)->close == 3505 && latest->at(0)->vol == 17, "native completed bar survives restore"); latest->release();
+        rejects([&] { nextData.controlledBar("SHFE.rb.2609", bar, false); });
+        rejects([&] { nextData.get_kline_slice("SHFE.rb.2609", KP_Minute5, 1, 2); });
+        complete.stepControlled(20260911, 210100000, 11); next.stepControlled(20260911, 210100000, 11);
+        check(complete.liveSnapshot() == next.liveSnapshot(), "next controlled event after joint restore matches uninterrupted state");
+        WtDtMgr badData; Engine bad; configure(bad, badData, base, "rb"); bad.addContext(std::make_shared<Context>(&bad));
+        auto corrupt = allState; auto at = corrupt.find("cross"); check(at != std::string::npos, "context identity in joint checkpoint");
+        corrupt.replace(at, 5, "wrong"); rejects([&] { bad.restoreLive(corrupt); });
+        check(bad.emptyState(), "late context decode failure must not partially restore the engine");
+        bad.startControlled(20260911, 210000000, 20260914, 10);
         std::cout << "CTA controlled clock regression passed\n"; return 0;
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

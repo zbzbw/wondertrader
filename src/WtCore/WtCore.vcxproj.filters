@@ -188,6 +188,12 @@
     <ClCompile Include="CtaLiveClock.cpp">
       <Filter>CTA</Filter>
     </ClCompile>
+    <ClCompile Include="CtaLiveData.cpp">
+      <Filter>CTA</Filter>
+    </ClCompile>
+    <ClCompile Include="CtaEngineState.cpp">
+      <Filter>CTA</Filter>
+    </ClCompile>
     <ClCompile Include="WtCtaTicker.cpp">
       <Filter>CTA</Filter>
     </ClCompile>

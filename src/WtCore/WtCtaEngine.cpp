@@ -253,6 +253,7 @@ void WtCtaEngine::on_session_end()
 
 void WtCtaEngine::on_schedule(uint32_t curDate, uint32_t curTime)
 {
+	if (_controlled && !_controlled_decisions) return;
 	//去检查一下过滤器
 	if (!_controlled) _filter_mgr.load_filters();
 	_exec_mgr.clear_cached_targets();
@@ -494,6 +495,10 @@ void WtCtaEngine::handle_pos_change(const char* straName, const char* stdCode, d
 
 void WtCtaEngine::on_tick(const char* stdCode, WTSTickData* curTick)
 {
+	if (_controlled && !_controlled_decisions) {
+		_data_mgr->handle_push_quote(stdCode, curTick);
+		return;
+	}
 	WtEngine::on_tick(stdCode, curTick);
 
 	_data_mgr->handle_push_quote(stdCode, curTick);
@@ -643,6 +648,7 @@ void WtCtaEngine::on_tick(const char* stdCode, WTSTickData* curTick)
 
 void WtCtaEngine::on_bar(const char* stdCode, const char* period, uint32_t times, WTSBarStruct* newBar)
 {
+	if (_controlled && !_controlled_decisions) return;
 	thread_local static char key[64] = { 0 };
 	fmtutil::format_to(key, "{}-{}-{}", stdCode, period, times);
 

@@ -94,4 +94,25 @@ EXPORT_FLAG const char* wt_mocker_live(ITraderApi* api, const char* request)
     }
     out.EndObject(); result.assign(buffer.GetString(), buffer.GetSize()); return result.c_str();
 }
+
+// Use the original WT binary64 tick directly: do not round an off-grid quote
+// through a textual price formatter before PaperAccount validates it.
+EXPORT_FLAG const char* wt_mocker_step(ITraderApi* api, uint64_t sequence, uint64_t event_ms, const WTSTickStruct* tick, uint32_t shared_liquidity)
+{
+    thread_local std::string result;
+    rapidjson::StringBuffer buffer; rapidjson::Writer<rapidjson::StringBuffer> out(buffer);
+    out.StartObject();
+    try {
+        auto mocker = dynamic_cast<TraderMocker*>(api); require(mocker && shared_liquidity <= 1);
+        auto release = [](WTSTickData* p) { if (p) p->release(); };
+        WTSTickStruct copy; if (tick) copy = *tick;
+        std::unique_ptr<WTSTickData, decltype(release)> input(tick ? WTSTickData::create(copy) : nullptr, release);
+        mocker->controlled_step(sequence, event_ms, input.get(), shared_liquidity != 0);
+        auto data = mocker->controlled_request("{\"op\":\"query\"}");
+        out.Key("ok"); out.Bool(true); out.Key("data"); out.RawValue(data.c_str(), data.size(), rapidjson::kObjectType);
+    } catch (const std::exception& error) {
+        out.Key("ok"); out.Bool(false); out.Key("error"); out.String(error.what());
+    }
+    out.EndObject(); result.assign(buffer.GetString(), buffer.GetSize()); return result.c_str();
+}
 }
