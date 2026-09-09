@@ -1,5 +1,8 @@
 ﻿#pragma once
 #include <atomic>
+#include <memory>
+#include <thread>
+#include "PaperAccount.h"
 
 #include <boost/asio.hpp>
 #include <boost/array.hpp>
@@ -22,9 +25,21 @@ USING_NS_WTP;
  */
 class TraderMocker : public ITraderApi
 {
+	friend class TraderMockerMatchingTest;
+	friend class TraderMockerAccountTest;
 public:
 	TraderMocker();
 	~TraderMocker();
+
+	// Invoked by the controlled WtPorter driver, never by a timer/UDP worker.
+	void controlled_step(uint64_t input_seq, uint64_t event_ms, WTSTickData* tick, bool shared_liquidity = false);
+	void controlled_barrier();
+	void controlled_settle(uint32_t trading_day, int64_t official_price);
+	void controlled_expire_day(uint32_t trading_day);
+	void controlled_begin_day(PaperAccount::Rules rules, int64_t mark);
+	std::string controlled_snapshot();
+	void controlled_restore(const std::string& state);
+	std::string controlled_request(const std::string& request);
 
 private:
 	/*
@@ -37,6 +52,15 @@ private:
 
 	void		load_positions();
 	void		save_positions();
+	std::unique_ptr<PaperAccount> _paper;
+	static int64_t paper_price(double price);
+	static PaperAccount::Rules paper_rules(const std::function<std::string(const char*)>& value, uint32_t day);
+	void controlled_owner() const;
+	std::thread::id _owner = std::this_thread::get_id();
+	uint64_t _input_seq = 0, _event_ms = 0;
+	bool _controlled_connected = false, _draining = false;
+	bool _shared_liquidity = false;
+	std::map<std::string, int64_t> _trade_fees;
 
 
 private:
@@ -50,7 +74,7 @@ private:
 	std::atomic<uint32_t>	_auto_entrust_id;
 
 	ITraderSpi* _listener;
-	IBaseDataMgr*		_bd_mgr;
+	IBaseDataMgr*		_bd_mgr = nullptr;
 
 	StdThreadPtr		_thrd_worker;
 

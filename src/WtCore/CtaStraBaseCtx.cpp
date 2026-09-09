@@ -218,6 +218,7 @@ void CtaStraBaseCtx::log_close(const char* stdCode, bool isLong, uint64_t openTi
 }
 void CtaStraBaseCtx::save_userdata()
 {
+	if (_engine->controlled()) return;
 	rj::Document root(rj::kObjectType);
 	rj::Document::AllocatorType &allocator = root.GetAllocator();
 	for (auto it = _user_datas.begin(); it != _user_datas.end(); it++)
@@ -494,6 +495,7 @@ void CtaStraBaseCtx::load_data(uint32_t flag /* = 0xFFFFFFFF */)
 
 void CtaStraBaseCtx::save_data(uint32_t flag /* = 0xFFFFFFFF */)
 {
+	if (_engine->controlled()) return;
 	rj::Document root(rj::kObjectType);
 
 	{//持仓数据保存
@@ -668,6 +670,7 @@ void CtaStraBaseCtx::on_bar(const char* stdCode, const char* period, uint32_t ti
 void CtaStraBaseCtx::on_init()
 {
 	init_outputs();
+	if (_engine->controlled()) return;
 
 	//读取数据
 	load_data();
@@ -982,9 +985,9 @@ bool CtaStraBaseCtx::on_schedule(uint32_t curDate, uint32_t curTime)
 				emmited = true;
 
 				_emit_times++;
-				_total_calc_time += ticker.micro_seconds();
+				if (!_engine->controlled()) _total_calc_time += ticker.micro_seconds();
 
-				if (_emit_times % 20 == 0)
+				if (!_engine->controlled() && _emit_times % 20 == 0)
 				{
 					log_info("Strategy has been scheduled {} times, totally taking {} us, {:.3f} us each time",
 						_emit_times, _total_calc_time, _total_calc_time*1.0 / _emit_times);

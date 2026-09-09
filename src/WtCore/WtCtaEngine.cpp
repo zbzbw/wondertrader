@@ -28,11 +28,13 @@
 #include "../WTSTools/WTSLogger.h"
 
 #include <rapidjson/document.h>
+#include <stdexcept>
 #include <rapidjson/prettywriter.h>
 namespace rj = rapidjson;
 
 WtCtaEngine::WtCtaEngine()
 	: _tm_ticker(NULL)
+	, _cfg(NULL)
 {
 	
 }
@@ -60,6 +62,7 @@ void WtCtaEngine::release()
 
 void WtCtaEngine::run()
 {
+	if (_controlled) throw std::logic_error("Controlled CTA requires explicit event steps");
 	_tm_ticker = new WtCtaRtTicker(this);
 	WTSVariant* cfgProd = _cfg->get("product");
 	_tm_ticker->init(_data_mgr->reader(), cfgProd->getCString("session"));
@@ -115,6 +118,8 @@ void WtCtaEngine::run()
 
 void WtCtaEngine::init(WTSVariant* cfg, IBaseDataMgr* bdMgr, WtDtMgr* dataMgr, IHotMgr* hotMgr, EventNotifier* notifier /* = NULL */)
 {
+	if (cfg->getBoolean("controlled") && cfg->getUInt32("poolsize") != 0)
+		throw std::invalid_argument("Controlled CTA requires a single event thread");
 	WtEngine::init(cfg, bdMgr, dataMgr, hotMgr, notifier);
 
 	_cfg = cfg;
@@ -248,8 +253,9 @@ void WtCtaEngine::on_session_end()
 
 void WtCtaEngine::on_schedule(uint32_t curDate, uint32_t curTime)
 {
+	if (_controlled && !_controlled_decisions) return;
 	//去检查一下过滤器
-	_filter_mgr.load_filters();
+	if (!_controlled) _filter_mgr.load_filters();
 	_exec_mgr.clear_cached_targets();
 	wt_hashmap<std::string, double> target_pos;
 	if(_pool)
@@ -407,7 +413,7 @@ void WtCtaEngine::on_schedule(uint32_t curDate, uint32_t curTime)
 		 *	By Wesley @ 2023.01.30
 		 *	增加一个定时刷新交易账号资金的入口
 		 */
-		_adapter_mgr->refresh_funds();
+		if (!_controlled) _adapter_mgr->refresh_funds();
 	});
 
 	//_exec_mgr.set_positions(target_pos);
@@ -489,6 +495,10 @@ void WtCtaEngine::handle_pos_change(const char* straName, const char* stdCode, d
 
 void WtCtaEngine::on_tick(const char* stdCode, WTSTickData* curTick)
 {
+	if (_controlled && !_controlled_decisions) {
+		_data_mgr->handle_push_quote(stdCode, curTick);
+		return;
+	}
 	WtEngine::on_tick(stdCode, curTick);
 
 	_data_mgr->handle_push_quote(stdCode, curTick);
@@ -638,6 +648,7 @@ void WtCtaEngine::on_tick(const char* stdCode, WTSTickData* curTick)
 
 void WtCtaEngine::on_bar(const char* stdCode, const char* period, uint32_t times, WTSBarStruct* newBar)
 {
+	if (_controlled && !_controlled_decisions) return;
 	thread_local static char key[64] = { 0 };
 	fmtutil::format_to(key, "{}-{}-{}", stdCode, period, times);
 
@@ -698,6 +709,7 @@ WTSSessionInfo* WtCtaEngine::get_sess_info(const char* stdCode)
 
 uint64_t WtCtaEngine::get_real_time()
 {
+	if (_controlled) return _controlled_time;
 	return TimeUtils::makeTime(_cur_date, _cur_raw_time * 100000 + _cur_secs);
 }
 

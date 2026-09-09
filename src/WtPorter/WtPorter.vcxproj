@@ -225,6 +225,8 @@
     <ClCompile Include="WtPorter.cpp" />
     <ClCompile Include="ExpCtaContext.cpp" />
     <ClCompile Include="WtRtRunner.cpp" />
+    <ClCompile Include="WtRtRunnerLive.cpp" />
+    <ClCompile Include="WtLivePorter.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\Common\mdump.h" />

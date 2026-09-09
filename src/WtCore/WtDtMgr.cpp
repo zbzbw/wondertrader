@@ -10,6 +10,7 @@
 #include "WtDtMgr.h"
 #include "WtEngine.h"
 #include "WtHelper.h"
+#include <stdexcept>
 
 #include "../Share/StrUtil.hpp"
 #include "../Share/CodeHelper.hpp"
@@ -98,7 +99,7 @@ bool WtDtMgr::init(WTSVariant* cfg, WtEngine* engine, bool bForceCache /* = fals
 
 	WTSLogger::info("Force to cache bars: {}", _force_cache ? "yes" : " no");
 
-	return initStore(cfg->get("store"));
+	return _engine->controlled() || initStore(cfg->get("store"));
 }
 
 void WtDtMgr::on_all_bar_updated(uint32_t updateTime)
@@ -420,6 +421,15 @@ constexpr inline const char* format_period(WTSKlinePeriod period)
 
 WTSKlineSlice* WtDtMgr::get_kline_slice(const char* stdCode, WTSKlinePeriod period, uint32_t times, uint32_t count, uint64_t etime /* = 0 */)
 {
+	if (_engine->controlled())
+	{
+		// The approved installed strategy requests the latest completed m5 bar;
+		// its 60-close indicator window belongs to the strategy checkpoint.
+		if (period != KP_Minute5 || times != 1 || count != 1 || etime != 0)
+			throw std::invalid_argument("Controlled strategy requires the latest completed m5 bar");
+		auto data = _bars_cache ? static_cast<WTSKlineData*>(_bars_cache->get(stdCode)) : nullptr;
+		return data ? WTSKlineSlice::create(stdCode, period, 1, data->at(0), 1) : nullptr;
+	}
 	if (_reader == NULL)
 		return NULL;
 

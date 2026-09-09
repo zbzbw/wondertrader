@@ -26,6 +26,7 @@ class WtEngine;
 
 class WtDtMgr : public IDataReaderSink, public IDataManager
 {
+	friend class WtCtaEngine;
 public:
 	WtDtMgr();
 	~WtDtMgr();
@@ -39,6 +40,9 @@ public:
 	void	regsiter_loader(IHisDataLoader* loader) { _loader = loader; }
 
 	void	handle_push_quote(const char* stdCode, WTSTickData* newTick);
+	void controlledBar(const char* stdCode, const WTSBarStruct& bar, bool notify);
+	std::string liveSnapshot() const;
+	void restoreLive(const std::string& state);
 
 	//////////////////////////////////////////////////////////////////////////
 	//IDataManager 接口

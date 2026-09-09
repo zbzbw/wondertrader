@@ -63,6 +63,10 @@
     <ClCompile Include="ActionPolicyMgr.cpp" />
     <ClCompile Include="CtaStrategyMgr.cpp" />
     <ClCompile Include="CtaStraBaseCtx.cpp" />
+    <ClCompile Include="CtaLiveState.cpp" />
+    <ClCompile Include="CtaLiveClock.cpp" />
+    <ClCompile Include="CtaLiveData.cpp" />
+    <ClCompile Include="CtaEngineState.cpp" />
     <ClCompile Include="EventNotifier.cpp" />
     <ClCompile Include="WtArbiExecuter.cpp" />
     <ClCompile Include="WtDiffExecuter.cpp" />
@@ -76,6 +80,8 @@
     <ClCompile Include="SelStrategyMgr.cpp" />
     <ClCompile Include="ParserAdapter.cpp" />
     <ClCompile Include="TraderAdapter.cpp" />
+    <ClCompile Include="TraderAdapterLive.cpp" />
+    <ClCompile Include="TraderLiveReports.cpp" />
     <ClCompile Include="WtDistExecuter.cpp" />
     <ClCompile Include="WtEngine.cpp" />
     <ClCompile Include="WtExecMgr.cpp" />

@@ -23,6 +23,7 @@
 #include <ShellAPI.h>
 #include <tchar.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 #define ARRSIZE(x)	(sizeof(x)/sizeof(x[0]))
 

@@ -12,6 +12,8 @@
 
 #include <boost/bind.hpp>
 #include <filesystem>
+#include <cmath>
+#include <stdexcept>
 namespace fs = std::filesystem;
 
 #include <rapidjson/document.h>
@@ -51,29 +53,15 @@ extern "C"
 
 std::vector<uint32_t> splitVolume(uint32_t vol, uint32_t minQty = 1, uint32_t maxQty = 100)
 {
-	uint32_t length = maxQty - minQty + 1;
 	std::vector<uint32_t> ret;
-	if (vol <= minQty)
+	if (minQty == 0 || maxQty < minQty)
+		throw std::invalid_argument("Invalid mocker fill quantity bounds");
+	// Stable maximum-sized whole-lot fills, with the final residual preserved.
+	while (vol > 0)
 	{
-		ret.emplace_back(vol);
-	}
-	else
-	{
-		uint32_t left = vol;
-		srand((uint32_t)time(NULL));
-		while (left > 0)
-		{
-			uint32_t curVol = minQty + (uint32_t)rand() % length;
-
-			if (curVol >= left)
-				curVol = left;
-
-			if (curVol == 0)
-				continue;
-
-			ret.emplace_back(curVol);
-			left -= curVol;
-		}
+		uint32_t curVol = (std::min)(vol, maxQty);
+		ret.emplace_back(curVol);
+		vol -= curVol;
 	}
 
 	return ret;
@@ -97,6 +85,8 @@ TraderMocker::TraderMocker()
 
 TraderMocker::~TraderMocker()
 {
+	if (_awaits)
+		_awaits->release();
 	if (_orders)
 		_orders->release();
 
@@ -124,7 +114,7 @@ bool TraderMocker::makeEntrustID(char* buffer, int length)
 
 	try
 	{
-		fmtutil::format_to(buffer, "me.{}.{}.{}", TimeUtils::getCurDate(), _mocker_id, _auto_entrust_id++);
+		fmtutil::format_to(buffer, "me.{}.{}.{}", _paper ? _paper->rules().trading_day : TimeUtils::getCurDate(), _mocker_id, _auto_entrust_id++);
 		return true;
 	}
 	catch (...)
@@ -136,7 +126,8 @@ bool TraderMocker::makeEntrustID(char* buffer, int length)
 }
 
 int TraderMocker::orderInsert(WTSEntrust* entrust)
-{	
+{
+	if (_paper) controlled_owner();
 	if (entrust == NULL)
 	{
 		return 0;
@@ -144,7 +135,8 @@ int TraderMocker::orderInsert(WTSEntrust* entrust)
 
 	entrust->retain();
 	_io_service.post([this, entrust](){
-		StdUniqueLock lock(_mutex_api);
+		StdUniqueLock ordersLock(_mtx_awaits, std::defer_lock); if (!_paper) ordersLock.lock();
+		StdUniqueLock lock(_mutex_api, std::defer_lock); if (!_paper) lock.lock();
 
 		WTSContractInfo* ct = entrust->getContractInfo();
 		if(ct == NULL) 
@@ -168,6 +160,33 @@ int TraderMocker::orderInsert(WTSEntrust* entrust)
 				break;
 			}
 			WTSCommodityInfo* commInfo = ct->getCommInfo();
+			if (_paper)
+			{
+				try
+				{
+					if (!_controlled_connected || _paper->rules().contract != ct->getFullCode() || entrust->getPriceType() != WPT_LIMITPRICE
+						|| entrust->getOrderFlag() != WOF_NOR || entrust->isNet()
+						|| (entrust->getDirection() != WDT_LONG && entrust->getDirection() != WDT_SHORT)
+						|| !std::isfinite(entrust->getVolume()) || entrust->getVolume() <= 0
+						|| entrust->getVolume() > INT32_MAX || std::floor(entrust->getVolume()) != entrust->getVolume())
+						throw std::invalid_argument("Controlled paper requires a whole-lot limit order on its contract");
+					PaperAccount::Offset offset;
+					switch (entrust->getOffsetType())
+					{
+					case WOT_OPEN: offset = PaperAccount::Open; break;
+					case WOT_CLOSETODAY: offset = PaperAccount::Today; break;
+					case WOT_CLOSEYESTERDAY: offset = PaperAccount::Yesterday; break;
+					default: throw std::invalid_argument("Explicit today/yesterday offset required");
+					}
+					bool known = _paper->orders().count(entrust->getEntrustID()) != 0;
+					_paper->reserve(entrust->getEntrustID(), entrust->getDirection() == WDT_SHORT,
+						offset, static_cast<int64_t>(entrust->getVolume()), paper_price(entrust->getPrice()));
+					if (known) { entrust->release(); return; }
+					bPass = true;
+				}
+				catch (const std::exception& error) { msg = error.what(); }
+				break;
+			}
 
 			//检查价格类型的合法性
 			if (entrust->getPriceType() == WPT_ANYPRICE && commInfo->getPriceMode() == PM_Limit)
@@ -274,13 +293,15 @@ int TraderMocker::orderInsert(WTSEntrust* entrust)
 			ordInfo->setDirection(entrust->getDirection());
 			ordInfo->setOffsetType(entrust->getOffsetType());
 			ordInfo->setUserTag(entrust->getUserTag());
+			ordInfo->setEntrustID(entrust->getEntrustID());
 			ordInfo->setPrice(entrust->getPrice());
 			thread_local static char str[64];
 			fmtutil::format_to(str, "mo.{}.{}", _mocker_id, makeOrderID());
 			ordInfo->setOrderID(str);
 			ordInfo->setStateMsg(msg.c_str());
 			ordInfo->setOrderState(WOS_NotTraded_Queuing);
-			ordInfo->setOrderTime(TimeUtils::getLocalTimeNow());
+			ordInfo->setOrderTime(_paper ? _event_ms : TimeUtils::getLocalTimeNow());
+			if (_paper) ordInfo->setOrderDate(_paper->rules().trading_day);
 			ordInfo->setVolume(entrust->getVolume());
 			ordInfo->setVolLeft(entrust->getVolume());
 			ordInfo->setPriceType(entrust->getPriceType());
@@ -327,6 +348,7 @@ int TraderMocker::orderInsert(WTSEntrust* entrust)
 
 int32_t TraderMocker::match_once()
 {
+	StdUniqueLock ordersLock(_mtx_awaits, std::defer_lock); if (!_paper) ordersLock.lock();
 	if (_terminated || _orders == NULL || _orders->size() == 0 || _ticks == NULL)
 		return 0;
 	
@@ -350,18 +372,22 @@ int32_t TraderMocker::match_once()
 		WTSTickData* curTick = (WTSTickData*)_ticks->grab(fullcode);
 		if (curTick && strcmp(curTick->code(), ct->getCode())==0)
 		{
-			StdUniqueLock lock(_mtx_awaits);
 			uint64_t tickTime = (uint64_t)curTick->actiondate() * 1000000000 + curTick->actiontime();
 			if (decimal::gt(curTick->price(), 0) /*&& tickTime >= _last_match_time*/)
 			{
+				if (_paper) _paper->mark(paper_price(curTick->price()));
 				//开始处理订单
 				//处理记录
 				std::vector<std::string> to_erase;
 
-				for (auto it = _awaits->begin(); it != _awaits->end(); it++)
+				double askLeft = curTick->askqty(0), bidLeft = curTick->bidqty(0);
+				// _orders is append-only in acceptance order; hash traversal is not FIFO.
+				for (uint32_t index = 0; index < _orders->size(); ++index)
 				{
-					WTSOrderInfo* ordInfo = (WTSOrderInfo*)it->second;
-					if (ordInfo->getVolLeft() == 0 || strcmp(ct->getCode(), curTick->code()) != 0)
+					WTSOrderInfo* ordInfo = (WTSOrderInfo*)_orders->at(index);
+					if (_awaits->get(ordInfo->getOrderID()) == NULL || ordInfo->getVolLeft() == 0
+						|| strcmp(ordInfo->getCode(), ct->getCode()) != 0
+						|| strcmp(ordInfo->getExchg(), ct->getExchg()) != 0)
 						continue;
 
 					bool isBuy = (ordInfo->getDirection() == WDT_LONG && ordInfo->getOffsetType() == WOT_OPEN) || (ordInfo->getDirection() != WDT_LONG && ordInfo->getOffsetType() != WOT_OPEN);
@@ -370,12 +396,12 @@ int32_t TraderMocker::match_once()
 					if (isBuy)
 					{
 						uPrice = curTick->askprice(0);
-						uVolume = curTick->askqty(0);
+						uVolume = askLeft;
 					}
 					else
 					{
 						uPrice = curTick->bidprice(0);
-						uVolume = curTick->bidqty(0);
+						uVolume = _shared_liquidity ? askLeft : bidLeft;
 					}
 
 					if (decimal::eq(uVolume, 0))
@@ -400,6 +426,14 @@ int32_t TraderMocker::match_once()
 					std::vector<uint32_t> ayVol = splitVolume((uint32_t)maxVolume, (uint32_t)_min_qty, (uint32_t)_max_qty);
 					for (uint32_t curVol : ayVol)
 					{
+						int64_t fillFee = 0;
+						if (_paper)
+						{
+							auto beforeFee = _paper->orders().at(ordInfo->getEntrustID()).charged_fee;
+							_paper->fill(ordInfo->getEntrustID(), curVol, paper_price(uPrice));
+							fillFee = _paper->orders().at(ordInfo->getEntrustID()).charged_fee - beforeFee;
+							_paper->mark(paper_price(curTick->price()));
+						}
 
 						WTSTradeInfo* trade = WTSTradeInfo::create(curTick->code(), curTick->exchg());
 						trade->setDirection(ordInfo->getDirection());
@@ -414,13 +448,16 @@ int32_t TraderMocker::match_once()
 						char str[64];
 						fmtutil::format_to(str, "mt.{}.{}", _mocker_id, makeTradeID());
 						trade->setTradeID(str);
+						if (_paper) _trade_fees.emplace(str, fillFee);
 
-						trade->setTradeTime(TimeUtils::getLocalTimeNow());
+						trade->setTradeTime(_paper ? _event_ms : TimeUtils::getLocalTimeNow());
+						if (_paper) trade->setTradeDate(_paper->rules().trading_day);
 						trade->setUserTag(ordInfo->getUserTag());
 
 						//更新订单数据
 						ordInfo->setVolLeft(ordInfo->getVolLeft() - curVol);
-						ordInfo->setVolTraded(ordInfo->getVolTraded() - curVol);
+						ordInfo->setVolTraded(ordInfo->getVolTraded() + curVol);
+						(isBuy || _shared_liquidity ? askLeft : bidLeft) -= curVol;
 						if (decimal::eq(ordInfo->getVolLeft(), 0))
 						{
 							ordInfo->setOrderState(WOS_AllTraded);
@@ -441,7 +478,7 @@ int32_t TraderMocker::match_once()
 							strcpy(pItem._exchg, ct->getExchg());
 						}
 
-						if(commInfo->getCoverMode() == CM_None)
+						if(_paper || commInfo->getCoverMode() == CM_None)
 						{
 
 						}
@@ -476,7 +513,7 @@ int32_t TraderMocker::match_once()
 
 						if (_listener)
 						{
-							StdUniqueLock lock(_mutex_api);
+							StdUniqueLock lock(_mutex_api, std::defer_lock); if (!_paper) lock.lock();
 							_listener->onPushOrder(ordInfo);
 							_listener->onPushTrade(trade);
 						}
@@ -517,8 +554,23 @@ int32_t TraderMocker::match_once()
 
 bool TraderMocker::init(WTSVariant *params)
 {
+	// Controlled account configuration is explicit; legacy smoke keeps its old model.
+	if (auto account = params->get("account"))
+	{
+		try
+		{
+			auto rules = paper_rules([&](const char* name) { return std::string(account->getString(name)); }, account->getUInt32("trading_day"));
+			auto exact = [&](const char* name, unsigned places) {
+				return PaperAccount::scaled_decimal(account->getString(name), places);
+			};
+			_paper.reset(new PaperAccount(rules, exact("initial_cash", 2), exact("mark", 6)));
+			_auto_order_id = _auto_trade_id = _auto_entrust_id = 0;
+		}
+		catch (const std::exception& error) { write_log(_listener, LL_ERROR, "{}", error.what()); return false; }
+	}
 	_millisecs = params->getUInt32("span");
 	_use_newpx = params->getBoolean("newpx");
+	if (_paper && _use_newpx) return false; // Controlled fills use the executable counterparty quote.
 	_mocker_id = params->getUInt32("mockerid");
 	_max_qty = params->getDouble("maxqty");
 	_min_qty = params->getDouble("minqty");
@@ -533,6 +585,10 @@ bool TraderMocker::init(WTSVariant *params)
 
 	if (decimal::eq(_min_qty, 0))
 		_min_qty = 1;
+	if (!std::isfinite(_min_qty) || !std::isfinite(_max_qty)
+		|| _min_qty < 1 || _max_qty < _min_qty || _max_qty > UINT32_MAX
+		|| std::floor(_min_qty) != _min_qty || std::floor(_max_qty) != _max_qty)
+		return false;
 
 	//加载持仓数据
 	std::stringstream ss;
@@ -548,6 +604,7 @@ bool TraderMocker::init(WTSVariant *params)
 
 void TraderMocker::load_positions()
 {
+	if (_paper) return; // A legacy positions file cannot restore a controlled account.
 	if (!fs::exists(_pos_file.c_str()))
 		return;
 
@@ -591,6 +648,7 @@ void TraderMocker::load_positions()
 
 void TraderMocker::save_positions()
 {
+	if (_paper) return; // Full controlled state is captured at the event barrier.
 	rj::Document root(rj::kObjectType);
 
 	{//持仓数据保存
@@ -660,7 +718,7 @@ void TraderMocker::registerSpi(ITraderSpi *listener)
 {
 	_listener = listener;
 
-	_bd_mgr = listener->getBaseDataMgr();
+	_bd_mgr = listener ? listener->getBaseDataMgr() : nullptr;
 }
 
 void TraderMocker::reconn_udp()
@@ -688,12 +746,19 @@ void TraderMocker::reconn_udp()
 
 void TraderMocker::connect()
 {
+	if (_paper)
+	{
+		controlled_owner();
+		_controlled_connected = true;
+		_io_service.post([this]() { if (_listener) _listener->handleEvent(WTE_Connect, 0); });
+		return;
+	}
 	reconn_udp();
 
 	_thrd_worker.reset(new StdThread(boost::bind(&boost::asio::io_service::run, &_io_service)));
 
 	_io_service.post([this](){
-		StdUniqueLock lock(_mutex_api);
+		StdUniqueLock lock(_mutex_api, std::defer_lock); if (!_paper) lock.lock();
 
 		load_positions();
 
@@ -704,6 +769,7 @@ void TraderMocker::connect()
 
 void TraderMocker::disconnect()
 {
+	if (_paper) { controlled_owner(); _controlled_connected = false; return; }
 	if (_terminated)
 		return;
 
@@ -717,11 +783,19 @@ void TraderMocker::disconnect()
 
 bool TraderMocker::isConnected()
 {
+	if (_paper) return _controlled_connected;
 	return _thrd_match != NULL;
 }
 
 int TraderMocker::login(const char* user, const char* pass, const char* productInfo)
 {
+	if (_paper)
+	{
+		controlled_owner();
+		if (!_controlled_connected) return -1;
+		_io_service.post([this]() { if (_listener) _listener->onLoginResult(true, "", _paper->rules().trading_day); });
+		return 0;
+	}
 	_thrd_match.reset(new StdThread([this]() {
 		while (!_terminated)
 		{
@@ -733,13 +807,30 @@ int TraderMocker::login(const char* user, const char* pass, const char* productI
 	}));
 
 	_io_service.post([this](){
-		StdUniqueLock lock(_mutex_api);
+		StdUniqueLock lock(_mutex_api, std::defer_lock); if (!_paper) lock.lock();
 
 		if (_listener)
 			_listener->onLoginResult(true, "", TimeUtils::getCurDate());
 	});
 
 	return 0;
+}
+
+PaperAccount::Rules TraderMocker::paper_rules(const std::function<std::string(const char*)>& value, uint32_t day)
+{
+	PaperAccount::Rules rules;
+	rules.contract = value("contract"); rules.source = value("source"); rules.trading_day = day;
+	auto exact = [&](const char* name, unsigned places) { return PaperAccount::scaled_decimal(value(name), places); };
+	rules.multiplier = exact("multiplier", 0); rules.tick = exact("tick", 6);
+	rules.upper_limit = exact("upper_limit", 6); rules.lower_limit = exact("lower_limit", 6);
+	rules.margin_rate = {exact("long_margin_rate", 8), exact("short_margin_rate", 8)};
+	const char* names[] = {"open", "today", "yesterday"};
+	for (size_t index = 0; index != 3; ++index)
+	{
+		std::string prefix = names[index];
+		rules.fees[index] = {exact((prefix + "_fee_per_lot").c_str(), 6), exact((prefix + "_fee_rate").c_str(), 8)};
+	}
+	return rules;
 }
 
 int TraderMocker::logout()
@@ -749,11 +840,12 @@ int TraderMocker::logout()
 
 int TraderMocker::orderAction(WTSEntrustAction* action)
 {
+	if (_paper) controlled_owner();
 	action->retain();
 	
 	_io_service.post([this, action](){
-		StdUniqueLock lck(_mtx_awaits);	//一定要把awaits锁起来,不然可能会导致一边撮合一边撤单
-		WTSOrderInfo* ordInfo = (WTSOrderInfo*)_awaits->grab(action->getOrderID());
+		StdUniqueLock lck(_mtx_awaits, std::defer_lock); if (!_paper) lck.lock();	//一定要把awaits锁起来,不然可能会导致一边撮合一边撤单
+		WTSOrderInfo* ordInfo = _awaits ? (WTSOrderInfo*)_awaits->grab(action->getOrderID()) : nullptr;
 
 		/*
 		 *	撤单也要考虑几个问题
@@ -768,6 +860,7 @@ int TraderMocker::orderAction(WTSEntrustAction* action)
 			if (_listener)
 				_listener->onTraderError(err);
 			err->release();
+			action->release();
 			return;
 		}
 
@@ -777,6 +870,12 @@ int TraderMocker::orderAction(WTSEntrustAction* action)
 		bool bPass = false;
 		do 
 		{
+			if (_paper)
+			{
+				_paper->cancel(ordInfo->getEntrustID());
+				bPass = true;
+				break;
+			}
 			//开仓委托直接撤单
 			if (ordInfo->getOffsetType() == WOT_OPEN)
 			{
@@ -812,14 +911,13 @@ int TraderMocker::orderAction(WTSEntrustAction* action)
 
 		if (_listener)
 		{
-			StdUniqueLock lock(_mutex_api);
+			StdUniqueLock lock(_mutex_api, std::defer_lock); if (!_paper) lock.lock();
 			_listener->onPushOrder(ordInfo);
 		}
 
+		_awaits->remove(action->getOrderID());
 		ordInfo->release();
 		action->release();
-
-		_awaits->remove(action->getOrderID());
 
 		save_positions();
 	});
@@ -829,6 +927,7 @@ int TraderMocker::orderAction(WTSEntrustAction* action)
 
 int TraderMocker::queryAccount()
 {
+	if (_paper) controlled_owner();
 	_io_service.post([this](){
 		WTSArray* ay = WTSArray::create();
 		WTSAccountInfo* accountInfo = WTSAccountInfo::create();
@@ -844,12 +943,26 @@ int TraderMocker::queryAccount()
 		accountInfo->setDeposit(0);
 		accountInfo->setWithdraw(0);
 		accountInfo->setDynProfit(0);
+		if (_paper)
+		{
+			auto balance = _paper->balance();
+			accountInfo->setBalance(balance.cash / 100.0);
+			accountInfo->setCloseProfit(balance.day_realized / 100.0);
+			accountInfo->setPreBalance(balance.pre_balance / 100.0);
+			accountInfo->setDeposit(balance.deposit / 100.0);
+			accountInfo->setMargin(balance.margin / 100.0);
+			accountInfo->setAvailable(balance.available / 100.0);
+			accountInfo->setCommission(balance.day_fees / 100.0);
+			accountInfo->setFrozenMargin(balance.frozen_margin / 100.0);
+			accountInfo->setFrozenCommission(balance.frozen_fee / 100.0);
+			accountInfo->setDynProfit(balance.unrealized / 100.0);
+		}
 
 		ay->append(accountInfo, false);
 
 		if (_listener)
 		{
-			StdUniqueLock lock(_mutex_api);
+			StdUniqueLock lock(_mutex_api, std::defer_lock); if (!_paper) lock.lock();
 			_listener->onRspAccount(ay);
 		}
 
@@ -861,8 +974,31 @@ int TraderMocker::queryAccount()
 
 int TraderMocker::queryPositions()
 {
+	if (_paper) controlled_owner();
 	_io_service.post([this](){
 		WTSArray* ayPos = WTSArray::create();
+		if (_paper)
+		{
+			const auto& code = _paper->rules().contract;
+			auto dot = code.find('.');
+			for (bool shortSide : {false, true})
+			{
+				auto position = WTSPositionItem::create(code.substr(dot + 1).c_str(), "CNY", code.substr(0, dot).c_str());
+				position->setDirection(shortSide ? WDT_SHORT : WDT_LONG);
+                position->setContractInfo(_bd_mgr->getContract(code.substr(dot + 1).c_str(), code.substr(0, dot).c_str()));
+                auto amounts = _paper->position_amounts(shortSide);
+                position->setPositionCost(amounts.cost / 100.0);
+                position->setMargin(amounts.margin / 100.0);
+                position->setDynProfit(amounts.unrealized / 100.0);
+                position->setAvgPrice(amounts.quantity ? amounts.cost / 100.0 / amounts.quantity / _paper->rules().multiplier : 0);
+
+				position->setNewPosition(static_cast<double>(_paper->position(shortSide, PaperAccount::Today, false)));
+				position->setPrePosition(static_cast<double>(_paper->position(shortSide, PaperAccount::Yesterday, false)));
+				position->setAvailNewPos(static_cast<double>(_paper->position(shortSide, PaperAccount::Today, true)));
+				position->setAvailPrePos(static_cast<double>(_paper->position(shortSide, PaperAccount::Yesterday, true)));
+				ayPos->append(position, false);
+			}
+		}
 
 		for(auto& v : _positions)
 		{
@@ -899,7 +1035,7 @@ int TraderMocker::queryPositions()
 
 		if (_listener)
 		{
-			StdUniqueLock lock(_mutex_api);
+			StdUniqueLock lock(_mutex_api, std::defer_lock); if (!_paper) lock.lock();
 			_listener->onRspPosition(ayPos);
 		}
 		ayPos->release();
@@ -908,10 +1044,116 @@ int TraderMocker::queryPositions()
 	return 0;
 }
 
+int64_t TraderMocker::paper_price(double price)
+{
+	if (!std::isfinite(price) || price <= 0 || price > static_cast<double>(INT64_MAX / 1000000))
+		throw std::invalid_argument("Invalid native paper price");
+	return static_cast<int64_t>(std::round(price * 1000000));
+}
+
+void TraderMocker::controlled_owner() const
+{
+	if (!_paper || std::this_thread::get_id() != _owner)
+		throw std::logic_error("Controlled paper must run on its owning event thread");
+}
+
+void TraderMocker::controlled_barrier()
+{
+	controlled_owner();
+	if (_draining) throw std::logic_error("Reentrant controlled event barrier");
+	_draining = true;
+	try { _io_service.reset(); _io_service.poll(); }
+	catch (...) { _draining = false; throw; }
+	_draining = false;
+}
+
+void TraderMocker::controlled_step(uint64_t input_seq, uint64_t event_ms, WTSTickData* tick, bool shared_liquidity)
+{
+	controlled_owner();
+	if (_draining || !_controlled_connected || input_seq != _input_seq + 1 || event_ms == 0 || event_ms < _event_ms)
+		throw std::invalid_argument("Invalid controlled event sequence, time or connection");
+	if (shared_liquidity && (!tick || tick->askqty(0) != tick->bidqty(0)
+		|| tick->askprice(0) != tick->bidprice(0) || tick->price() != tick->askprice(0)))
+		throw std::invalid_argument("Bar simulation requires one shared price and quantity");
+	if (tick)
+	{
+		if (_paper->settled() || tick->tradingdate() != _paper->rules().trading_day
+			|| std::string(tick->exchg()) + "." + tick->code() != _paper->rules().contract)
+			throw std::invalid_argument("Controlled tick contract or trading day mismatch");
+		auto validatePrice = [&](double value) {
+			auto fixed = paper_price(value);
+			const auto& rule = _paper->rules();
+			if (fixed < rule.lower_limit || fixed > rule.upper_limit || fixed % rule.tick)
+				throw std::invalid_argument("Controlled quote outside price rules");
+		};
+		validatePrice(tick->price());
+		for (auto pair : {std::make_pair(tick->askqty(0), tick->askprice(0)), std::make_pair(tick->bidqty(0), tick->bidprice(0))})
+		{
+			if (!std::isfinite(pair.first) || pair.first < 0 || pair.first > UINT32_MAX || std::floor(pair.first) != pair.first)
+				throw std::invalid_argument("Controlled liquidity must be nonnegative whole lots");
+			if (pair.first > 0) validatePrice(pair.second);
+		}
+	}
+	_event_ms = event_ms;
+	controlled_barrier(); // Orders from the preceding event enter before this quote.
+	_shared_liquidity = shared_liquidity;
+	_draining = true;
+	try
+	{
+		if (tick)
+		{
+			_paper->mark(paper_price(tick->price()));
+			if (!_ticks) _ticks = TickCache::create();
+			_ticks->add(_paper->rules().contract, tick);
+			match_once();
+			_ticks->clear(); // A quote is consumed even when there were no orders.
+		}
+		_input_seq = input_seq;
+	}
+	catch (...) { _shared_liquidity = false; _draining = false; throw; }
+	_shared_liquidity = false;
+	_draining = false;
+}
+
+void TraderMocker::controlled_settle(uint32_t trading_day, int64_t official_price)
+{
+	controlled_barrier();
+	_paper->settle(trading_day, official_price);
+	controlled_expire_day(trading_day);
+}
+
+void TraderMocker::controlled_expire_day(uint32_t trading_day)
+{
+	controlled_barrier();
+	_paper->expire_day(trading_day);
+	if (!_orders) return;
+	_draining = true;
+	try
+	{
+	for (uint32_t index = 0; index != _orders->size(); ++index)
+	{
+		auto order = static_cast<WTSOrderInfo*>(_orders->at(index));
+		if (!_awaits->get(order->getOrderID())) continue;
+		order->setOrderState(WOS_Canceled); order->setStateMsg("DAY expired");
+		_awaits->remove(order->getOrderID());
+		if (_listener) _listener->onPushOrder(order);
+	}
+	}
+	catch (...) { _draining = false; throw; }
+	_draining = false;
+}
+
+void TraderMocker::controlled_begin_day(PaperAccount::Rules rules, int64_t mark)
+{
+	controlled_barrier();
+	_paper->begin_day(std::move(rules), mark);
+}
+
 int TraderMocker::queryOrders()
 {
+	if (_paper) controlled_owner();
 	_io_service.post([this](){
-		StdUniqueLock lock(_mutex_api);
+		StdUniqueLock lock(_mutex_api, std::defer_lock); if (!_paper) lock.lock();
 
 		if (_listener)
 			_listener->onRspOrders(_orders);
@@ -922,8 +1164,9 @@ int TraderMocker::queryOrders()
 
 int TraderMocker::queryTrades()
 {
+	if (_paper) controlled_owner();
 	_io_service.post([this](){
-		StdUniqueLock lock(_mutex_api);
+		StdUniqueLock lock(_mutex_api, std::defer_lock); if (!_paper) lock.lock();
 
 		if (_listener)
 			_listener->onRspTrades(_trades);

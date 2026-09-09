@@ -1,4 +1,5 @@
-﻿/*!
+﻿#include "../Share/BarReplay.hpp"
+/*!
  * \file HisDataReplayer.cpp
  * \project	WonderTrader
  *
@@ -1272,15 +1273,7 @@ void HisDataReplayer::simTicks(uint32_t uDate, uint32_t uTime, uint32_t endTDate
 							curTS.action_date = _cur_date;
 							curTS.action_time = _cur_time * 100000;
 
-							double newPx = 0.0;
-							if (pxType == 0)
-								newPx = nextBar.open;
-							else if (pxType == 1)
-								newPx = nextBar.high;
-							else if (pxType == 2)
-								newPx = nextBar.low;
-							else if (pxType == 3)
-								newPx = nextBar.close;
+							double newPx = replayBarPrice(nextBar, pxType);
 
 							curTS.price = newPx;
 							curTS.volume = nextBar.vol;
@@ -1347,15 +1340,7 @@ void HisDataReplayer::simTicks(uint32_t uDate, uint32_t uTime, uint32_t endTDate
 							curTS.action_date = _cur_date;
 							curTS.action_time = curTime * 100000;
 
-							double newPx = 0.0;
-							if (pxType == 0)
-								newPx = nextBar.open;
-							else if (pxType == 1)
-								newPx = nextBar.high;
-							else if (pxType == 2)
-								newPx = nextBar.low;
-							else if (pxType == 3)
-								newPx = nextBar.close;
+							double newPx = replayBarPrice(nextBar, pxType);
 
 							curTS.price = newPx;
 							curTS.volume = nextBar.vol;
@@ -1417,15 +1402,7 @@ void HisDataReplayer::simTickWithUnsubBars(uint64_t stime, uint64_t nowTime, uin
 						curTS.action_time = _cur_time * 100000;
 
 						curTS.volume = nextBar.vol;
-						double newPx = 0.0;
-						if (pxType == 0)
-							newPx = nextBar.open;
-						else if (pxType == 1)
-							newPx = nextBar.high;
-						else if (pxType == 2)
-							newPx = nextBar.low;
-						else if (pxType == 3)
-							newPx = nextBar.close;
+						double newPx = replayBarPrice(nextBar, pxType);
 
 						curTS.price = newPx;
 						//更新开高低三个字段
@@ -1485,15 +1462,7 @@ void HisDataReplayer::simTickWithUnsubBars(uint64_t stime, uint64_t nowTime, uin
 						curTS.action_time = curTime * 100000;
 
 						curTS.volume = nextBar.vol;
-						double newPx = 0.0;
-						if (pxType == 0)
-							newPx = nextBar.open;
-						else if (pxType == 1)
-							newPx = nextBar.high;
-						else if (pxType == 2)
-							newPx = nextBar.low;
-						else if (pxType == 3)
-							newPx = nextBar.close;
+						double newPx = replayBarPrice(nextBar, pxType);
 
 						curTS.price = newPx;
 						//更新开高低三个字段

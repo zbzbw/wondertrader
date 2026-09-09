@@ -8,6 +8,11 @@
  * \brief 
  */
 #pragma once
+#include <atomic>
+#include <map>
+#include <thread>
+#include <memory>
+#include <boost/noncopyable.hpp>
 
 #include "../Includes/ExecuteDefs.h"
 #include "../Includes/FasterDefs.h"
@@ -18,6 +23,7 @@
 
 NS_WTP_BEGIN
 class WTSVariant;
+struct WTSTickStruct;
 class ActionPolicyMgr;
 class WTSContractInfo;
 class WTSCommodityInfo;
@@ -30,6 +36,7 @@ typedef std::function<void(const char*, bool, double, double, double, double)> F
 
 class TraderAdapter : public ITraderSpi
 {
+	friend class TraderAdapterLiveTest;
 public:
 	TraderAdapter(EventNotifier* caster = NULL);
 	~TraderAdapter();
@@ -120,7 +127,69 @@ public:
 
 	void queryFund();
 
+	struct LiveCommand
+	{
+		std::string contract, entrust_id, status = "prepared";
+		WTSDirectionType direction = WDT_LONG;
+		WTSOffsetType offset = WOT_OPEN;
+		double price = 0, quantity = 0;
+		uint32_t local_id = UINT32_MAX;
+	};
+	void configureLive(const std::string& run, uint64_t generation, const std::string& contract,
+		std::function<void(CommonExecuter)> queue);
+	void armLive(const std::string& run, uint64_t generation);
+	void blockLive();
+	uint32_t submitLive(const std::string& run, uint64_t generation, const std::string& command, WTSEntrust* entrust);
+	bool cancelLive(const std::string& run, uint64_t generation, const std::string& command, const std::string& target);
+	const std::map<std::string, LiveCommand>& liveCommands() const { return _live_commands; }
+	std::string liveSnapshot() const;
+	void restoreLive(const std::string& state);
+	using LiveReportSink = std::function<void(const char*, const WTSObject*, const WTSObject*)>;
+	void setLiveReportSink(LiveReportSink sink) { liveIdentity(_live_run, _live_generation); _live_report = std::move(sink); }
+	bool liveConnected() const { return _live_connected; }
+	uint32_t liveTradingDay() const { return supportsPaperControl() ? _live_trading_day : _trading_day; }
+	bool supportsPaperControl() const { return _mocker_live && _mocker_step && _mocker_version == 1; }
+	std::string paperControl(const std::string& request);
+	std::string paperStep(uint64_t sequence, uint64_t event_ms, const WTSTickStruct* tick, bool shared_liquidity = false);
+	int queryLiveFacts();
+	std::string liveReports() const;
+	void acknowledgeLiveReports(uint64_t sequence);
+	void stampLiveInput(uint64_t sequence, uint64_t event_ms, const std::string& received_at, uint32_t trading_day);
+	void recordLiveReport(const char* kind, const WTSObject* payload, const WTSObject* error);
+
 private:
+	bool liveSendAllowed(WTSEntrust* entrust) const;
+	uint32_t liveOrderId(const WTSOrderInfo* order) const;
+	void liveIdentity(const std::string& run, uint64_t generation) const;
+	bool liveDeferred();
+	void deferLive(CommonExecuter action);
+	static std::shared_ptr<WTSObject> copyLive(const WTSObject* value);
+	std::function<void(CommonExecuter)> _live_queue;
+	bool _live_dispatching = false;
+	LiveReportSink _live_report;
+	std::map<uint64_t, std::string> _live_reports;
+	std::string _live_source;
+	uint64_t _live_report_seq = 0, _live_report_ack = 0;
+	uint64_t _live_input_seq = 0, _live_event_ms = 0, _live_arrival_ms = 0;
+	uint32_t _live_trading_day = 0;
+	std::string _live_received_at;
+	using MockerControl = const char* (*)(ITraderApi*, const char*);
+	MockerControl _mocker_live = nullptr;
+	using MockerStep = const char* (*)(ITraderApi*, uint64_t, uint64_t, const WTSTickStruct*, uint32_t);
+	MockerStep _mocker_step = nullptr;
+	uint32_t _mocker_version = 0;
+	bool _live_controlled = false;
+	std::atomic<bool> _live_enabled{false}, _live_connected{false};
+	std::thread::id _live_owner;
+	std::string _live_run, _live_contract;
+	uint64_t _live_generation = 0;
+	uint32_t _live_local_order = 0;
+	WTSEntrust* _live_entrust = nullptr;
+	LiveCommand* _live_command = nullptr;
+	uint32_t _live_cancel_local = UINT32_MAX;
+	std::map<std::string, LiveCommand> _live_commands;
+	std::map<std::string, std::pair<std::string, bool>> _live_cancels;
+
 	uint32_t doEntrust(WTSEntrust* entrust);
 	bool	doCancel(WTSOrderInfo* ordInfo);
 
