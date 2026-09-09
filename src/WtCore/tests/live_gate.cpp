@@ -134,6 +134,23 @@ public:
         check(plugin.inserts == 2, "restored unknown command is observed without resending");
         rejects([&] { restarted.submitLive("run-one", 4, "one", entrust); });
         rejects([&] { restarted.submitLive("run-two", 5, "new-blocked", entrust); });
+        restarted.setLiveReportSink({});
+        entrust->setEntrustID(restarted.liveCommands().at("unknown").entrust_id.c_str());
+        auto error = WTSError::create(WEC_ORDERINSERT, "insufficient funds");
+        restarted.onRspEntrust(entrust, error);
+        restarted.onRspEntrust(entrust, error);
+        error->release();
+        while (!callbacks.empty()) {
+            auto queued = std::move(callbacks.front()); callbacks.erase(callbacks.begin()); queued();
+        }
+        check(restarted.liveCommands().at("unknown").status == "rejected", "async duplicate rejection terminates original command");
+        auto rejectedState = restarted.liveSnapshot();
+        TraderAdapter rejectedRestore;
+        rejectedRestore._order_pattern = "otp.test";
+        rejectedRestore.configureLive("run-three", 6, "TEST.test1", queue);
+        rejectedRestore.restoreLive(rejectedState);
+        check(rejectedRestore.liveCommands().at("unknown").status == "rejected", "rejection terminal survives restore without an order report");
+        check(rejectedRestore.liveReports().find("insufficient funds") != std::string::npos, "raw rejection remains queryable after restore");
         trader._orders->release(); trader._orders = nullptr;
         entrust->release(); contract->release(); commodity->release();
     }

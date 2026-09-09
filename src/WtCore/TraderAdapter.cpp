@@ -521,6 +521,7 @@ uint32_t TraderAdapter::doEntrust(WTSEntrust* entrust)
 		_live_command->status = "unknown"; // Record the attempt before entering a possibly synchronous plugin.
 	}
 	int32_t ret = _trader_api->orderInsert(entrust);
+	if (_live_controlled && _live_command->status == "rejected") return UINT32_MAX;
 	if (_live_controlled && ret >= 0) _live_command->status = "submitted";
 	if(ret < 0)
 	{
@@ -1489,7 +1490,16 @@ void TraderAdapter::onLogout()
 void TraderAdapter::onRspEntrust(WTSEntrust* entrust, WTSError *err)
 {
 	if (liveDeferred()) { auto copy0 = copyLive(entrust); auto copy1 = copyLive(err); deferLive([this, copy0, copy1]() { onRspEntrust(static_cast<WTSEntrust*>(copy0.get()), static_cast<WTSError*>(copy1.get())); }); return; }
-	if (_live_controlled) recordLiveReport("onRspEntrust", entrust, err);
+	if (_live_controlled)
+	{
+		if (err && err->getErrorCode() != WEC_NONE)
+			for (auto& entry : _live_commands)
+				if (entry.second.entrust_id == entrust->getEntrustID()
+					&& entry.second.contract == entrust->getContractInfo()->getFullCode())
+					entry.second.status = "rejected";
+		recordLiveReport("onRspEntrust", entrust, err);
+		return; // Controlled commands and reports replace legacy tag/undone bookkeeping.
+	}
 	if (err && err->getErrorCode() != WEC_NONE)
 	{
 		WTSLogger::log_dyn("trader", _id.c_str(), LL_ERROR, err->getMessage());
