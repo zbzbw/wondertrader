@@ -10,6 +10,10 @@
 #include "WtCtaTicker.h"
 #include "WtCtaEngine.h"
 #include "../Includes/IDataReader.h"
+#include <stdexcept>
+#include <rapidjson/document.h>
+#include <rapidjson/stringbuffer.h>
+#include <rapidjson/writer.h>
 
 #include "../Share/CodeHelper.hpp"
 #include "../Share/TimeUtils.hpp"
@@ -61,6 +65,14 @@ void WtCtaRtTicker::trigger_price(WTSTickData* curTick)
 
 void WtCtaRtTicker::on_tick(WTSTickData* curTick)
 {
+	if (_controlled)
+	{
+		if (curTick->tradingdate() != _engine->getTradingDate())
+			throw std::invalid_argument("Controlled tick trading day mismatch");
+		stepControlled(curTick->actiondate(), curTick->actiontime(), _engine->controlled_time());
+		trigger_price(curTick);
+		return;
+	}
 	if (_thrd == NULL)
 	{
 		trigger_price(curTick);
@@ -170,6 +182,7 @@ void WtCtaRtTicker::on_tick(WTSTickData* curTick)
 
 void WtCtaRtTicker::run()
 {
+	if (_controlled) throw std::logic_error("Controlled ticker has no wall clock thread");
 	if (_thrd)
 		return;
 

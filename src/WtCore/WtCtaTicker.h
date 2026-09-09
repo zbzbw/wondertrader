@@ -10,6 +10,7 @@
 #pragma once
 #include <stdint.h>
 #include <atomic>
+#include <string>
 
 #include "../Includes/WTSMarcos.h"
 #include "../Share/StdUtils.hpp"
@@ -39,6 +40,11 @@ public:
 	void	init(IDataReader* store, const char* sessionID);
 	//void	set_time(uint32_t uDate, uint32_t uTime);
 	void	on_tick(WTSTickData* curTick);
+	void initControlled(IDataReader* store, const char* sessionID);
+	void startControlled(uint32_t date, uint32_t time, uint32_t tradingDay, uint64_t event_ms, bool initialize = true);
+	void stepControlled(uint32_t date, uint32_t time, uint64_t event_ms);
+	std::string liveSnapshot() const;
+	void restoreLive(const std::string& state);
 
 	void	run();
 	void	stop();
@@ -51,6 +57,8 @@ private:
 
 private:
 	WTSSessionInfo*	_s_info;
+	bool _controlled = false;
+	bool _session_ended = false;
 	WtCtaEngine*	_engine;
 	IDataReader*	_store;
 

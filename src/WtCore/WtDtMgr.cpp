@@ -98,7 +98,7 @@ bool WtDtMgr::init(WTSVariant* cfg, WtEngine* engine, bool bForceCache /* = fals
 
 	WTSLogger::info("Force to cache bars: {}", _force_cache ? "yes" : " no");
 
-	return initStore(cfg->get("store"));
+	return _engine->controlled() || initStore(cfg->get("store"));
 }
 
 void WtDtMgr::on_all_bar_updated(uint32_t updateTime)

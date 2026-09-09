@@ -61,6 +61,10 @@ public:
 	CtaStraBaseCtx(WtCtaEngine* engine, const char* name, int32_t slippage);
 	virtual ~CtaStraBaseCtx();
 
+	// Complete in-memory state at the controlled event barrier; never emits orders.
+	std::string liveSnapshot() const;
+	void restoreLive(const std::string& state);
+
 private:
 	void	init_outputs();
 	inline void log_signal(const char* stdCode, double target, double price, uint64_t gentime, const char* usertag = "");

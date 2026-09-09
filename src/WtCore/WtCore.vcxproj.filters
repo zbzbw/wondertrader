@@ -158,6 +158,12 @@
     <ClCompile Include="TraderAdapter.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
+    <ClCompile Include="TraderAdapterLive.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="TraderLiveReports.cpp">
+      <Filter>Common</Filter>
+    </ClCompile>
     <ClCompile Include="ParserAdapter.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
@@ -174,6 +180,12 @@
       <Filter>CTA</Filter>
     </ClCompile>
     <ClCompile Include="CtaStraBaseCtx.cpp">
+      <Filter>CTA</Filter>
+    </ClCompile>
+    <ClCompile Include="CtaLiveState.cpp">
+      <Filter>CTA</Filter>
+    </ClCompile>
+    <ClCompile Include="CtaLiveClock.cpp">
       <Filter>CTA</Filter>
     </ClCompile>
     <ClCompile Include="WtCtaTicker.cpp">

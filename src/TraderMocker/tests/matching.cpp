@@ -7,6 +7,10 @@
 #include "../../Includes/WTSVariant.hpp"
 #include <iostream>
 #include <stdexcept>
+#include <rapidjson/document.h>
+
+extern "C" uint32_t wt_mocker_live_abi();
+extern "C" const char* wt_mocker_live(ITraderApi*, const char*);
 
 std::vector<uint32_t> splitVolume(uint32_t, uint32_t, uint32_t);
 
@@ -162,6 +166,13 @@ public:
         check(trader._paper->balance().cash == 999400 && trader._paper->balance().frozen_margin == 12000,
               "native matching debits actual fees and releases filled reservation");
         auto checkpoint = trader.controlled_snapshot();
+        check(wt_mocker_live_abi() == 1, "controlled extension ABI version");
+        rapidjson::Document response;
+        response.Parse(wt_mocker_live(&trader, "{\"op\":\"query\"}"));
+        check(response["ok"].GetBool() && std::string(response["data"]["balance"]["cash"].GetString()) == "9994.00"
+              && std::string(response["data"]["state"].GetString()) == checkpoint, "C ABI returns exact native cash and complete component");
+        response.Parse(wt_mocker_live(&trader, "{\"op\":\"step\",\"sequence\":20,\"event_ms\":1788915602000,\"tick\":null}"));
+        check(!response["ok"].GetBool() && trader.controlled_snapshot() == checkpoint, "C ABI errors do not cross the boundary or advance input");
         struct Listener : ITraderSpi {
             Data* data;
             std::function<void(WTSArray*)> account;

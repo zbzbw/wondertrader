@@ -70,6 +70,7 @@ std::string TraderMocker::controlled_snapshot()
         num("date", trade->getTradeDate()); num("time", trade->getTradeTime());
         num("quantity", static_cast<uint64_t>(trade->getVolume()));
         num("price", paper_price(trade->getPrice()));
+        num("fee_cents", _trade_fees.at(trade->getTradeID()));
         out.EndObject();
     }
     out.EndArray(); out.EndObject();
@@ -107,6 +108,7 @@ void TraderMocker::controlled_restore(const std::string& state)
     std::map<std::string, WTSOrderInfo*> byOrder;
     std::set<std::string> commands, tradeIds;
     std::map<std::string, uint64_t> traded;
+    std::map<std::string, int64_t> tradeFees, paid;
     for (const auto& value : sourceOrders.GetArray()) {
         auto id = shortText(value, "id"), command = shortText(value, "command_id");
         require(!id.empty() && commands.insert(command).second && !byOrder.count(id), "Duplicate native order/command");
@@ -137,6 +139,11 @@ void TraderMocker::controlled_restore(const std::string& state)
         require(!id.empty() && tradeIds.insert(id).second && byOrder.count(orderId), "Invalid native trade identity");
         auto order = byOrder.at(orderId);
         auto quantity = number(value, "quantity"), price = number(value, "price");
+        auto fee = number(value, "fee_cents");
+        auto totalFee = account->orders().at(order->getEntrustID()).charged_fee;
+        require(fee <= static_cast<uint64_t>(totalFee) && paid[orderId] <= totalFee - static_cast<int64_t>(fee),
+                "Trade fees exceed native charged fees");
+        paid[orderId] += static_cast<int64_t>(fee); tradeFees.emplace(id, static_cast<int64_t>(fee));
         auto date = number(value, "date"), time = number(value, "time");
         require(quantity > 0 && quantity <= INT32_MAX && price > 0 && price <= INT64_MAX
                 && price % account->rules().tick == 0 && date >= order->getOrderDate()
@@ -151,10 +158,13 @@ void TraderMocker::controlled_restore(const std::string& state)
         trade->setVolume(static_cast<double>(quantity)); trade->setPrice(price / 1000000.0);
         trade->setTradeDate(static_cast<uint32_t>(date)); trade->setTradeTime(time);
     }
-    for (const auto& entry : byOrder)
+    for (const auto& entry : byOrder) {
         require(traded[entry.first] == entry.second->getVolTraded(), "Incomplete native trade history");
+        require(paid[entry.first] == account->orders().at(entry.second->getEntrustID()).charged_fee, "Incomplete native trade fees");
+    }
     // Commit only after the entire component validates. No callbacks or funding.
     _paper = std::move(account); _orders = orders.release(); _trades = trades.release();
+    _trade_fees = std::move(tradeFees);
     if (_awaits) _awaits->release();
     _awaits = awaits.release(); _codes.clear();
     if (_orders->size()) _codes.insert(fullCode);

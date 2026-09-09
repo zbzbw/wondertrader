@@ -83,6 +83,10 @@ class WtEngine : public WtPortContext, public IParserStub
 public:
 	WtEngine();
 
+	bool controlled() const { return _controlled; }
+	uint64_t controlled_time() const { return _controlled_time; }
+	void set_controlled_time(uint64_t event_ms) { _controlled_time = event_ms; }
+
 	inline void set_adapter_mgr(TraderAdapterMgr* mgr) { _adapter_mgr = mgr; }
 
 	void set_date_time(uint32_t curDate, uint32_t curTime, uint32_t curSecs = 0, uint32_t rawTime = 0);
@@ -170,6 +174,9 @@ public:
 
 
 protected:
+	bool _controlled = false;
+	uint64_t _controlled_time = 0;
+
 	void		load_fees(const char* filename);
 
 	void		load_datas();

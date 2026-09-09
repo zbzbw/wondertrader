@@ -22,6 +22,7 @@
     <ClCompile Include="TraderMocker.cpp" />
     <ClCompile Include="PaperAccount.cpp" />
     <ClCompile Include="ControlledState.cpp" />
+    <ClCompile Include="ControlledApi.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="TraderMocker.h" />

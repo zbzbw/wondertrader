@@ -30,6 +30,7 @@
 #include "../WTSUtils/WTSCfgLoader.h"
 
 #include <rapidjson/document.h>
+#include <stdexcept>
 #include <rapidjson/prettywriter.h>
 namespace rj = rapidjson;
 
@@ -188,7 +189,7 @@ void WtEngine::update_fund_dynprofit()
 		return;
 	}
 
-	int64_t now = TimeUtils::getLocalTimeNow();
+	int64_t now = _controlled ? static_cast<int64_t>(_controlled_time) : TimeUtils::getLocalTimeNow();
 	if(_fund_udt_span != 0)
 	{
 		if (now - fundInfo._update_time < _fund_udt_span * 1000)
@@ -284,6 +285,9 @@ WTSPortFundInfo* WtEngine::getFundInfo()
 
 void WtEngine::init(WTSVariant* cfg, IBaseDataMgr* bdMgr, WtDtMgr* dataMgr, IHotMgr* hotMgr, EventNotifier* notifier)
 {
+	_controlled = cfg->getBoolean("controlled");
+	if (_controlled && cfg->get("riskmon"))
+		throw std::invalid_argument("Controlled CTA does not run an independent risk monitor");
 	_base_data_mgr = bdMgr;
 	_data_mgr = dataMgr;
 	_hot_mgr = hotMgr;
@@ -297,7 +301,13 @@ void WtEngine::init(WTSVariant* cfg, IBaseDataMgr* bdMgr, WtDtMgr* dataMgr, IHot
 
 	load_fees(cfg->getCString("fees"));
 
-	load_datas();
+	if (_controlled)
+	{
+		_port_fund = WTSPortFundInfo::create();
+		set_date_time(0, 0); set_trading_date(0);
+	}
+	else
+		load_datas();
 
 	init_outputs();
 
@@ -310,8 +320,9 @@ void WtEngine::init(WTSVariant* cfg, IBaseDataMgr* bdMgr, WtDtMgr* dataMgr, IHot
 	{
 		//如果没有配置风控线程，则需要自己更新浮动盈亏
 		//把更新时间间隔设置为5s
-		_fund_udt_span = 5;
-		WTSLogger::log_raw(LL_WARN, "RiskMon is not configured, portfilio fund will be updated every 5s");
+		_fund_udt_span = _controlled ? 0 : 5;
+		if (!_controlled)
+			WTSLogger::log_raw(LL_WARN, "RiskMon is not configured, portfilio fund will be updated every 5s");
 	}
 }
 
@@ -366,6 +377,7 @@ void WtEngine::on_session_begin()
 
 void WtEngine::save_datas()
 {
+	if (_controlled) return; // The parent commits the complete native barrier checkpoint.
 	rj::Document root(rj::kObjectType);
 	rj::Document::AllocatorType &allocator = root.GetAllocator();
 
@@ -1085,6 +1097,7 @@ void WtEngine::do_set_position(const char* stdCode, double qty, double curPx /* 
 
 void WtEngine::push_task(TaskItem task)
 {
+	if (_controlled) { task(); return; }
 	{
 		StdUniqueLock lock(_mtx_task);
 		_task_queue.push(task);

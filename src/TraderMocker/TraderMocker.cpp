@@ -426,9 +426,12 @@ int32_t TraderMocker::match_once()
 					std::vector<uint32_t> ayVol = splitVolume((uint32_t)maxVolume, (uint32_t)_min_qty, (uint32_t)_max_qty);
 					for (uint32_t curVol : ayVol)
 					{
+						int64_t fillFee = 0;
 						if (_paper)
 						{
+							auto beforeFee = _paper->orders().at(ordInfo->getEntrustID()).charged_fee;
 							_paper->fill(ordInfo->getEntrustID(), curVol, paper_price(uPrice));
+							fillFee = _paper->orders().at(ordInfo->getEntrustID()).charged_fee - beforeFee;
 							_paper->mark(paper_price(curTick->price()));
 						}
 
@@ -445,6 +448,7 @@ int32_t TraderMocker::match_once()
 						char str[64];
 						fmtutil::format_to(str, "mt.{}.{}", _mocker_id, makeTradeID());
 						trade->setTradeID(str);
+						if (_paper) _trade_fees.emplace(str, fillFee);
 
 						trade->setTradeTime(_paper ? _event_ms : TimeUtils::getLocalTimeNow());
 						if (_paper) trade->setTradeDate(_paper->rules().trading_day);
@@ -555,21 +559,10 @@ bool TraderMocker::init(WTSVariant *params)
 	{
 		try
 		{
-			PaperAccount::Rules rules;
-			rules.contract = account->getString("contract"); rules.source = account->getString("source");
-			rules.trading_day = account->getUInt32("trading_day");
+			auto rules = paper_rules([&](const char* name) { return std::string(account->getString(name)); }, account->getUInt32("trading_day"));
 			auto exact = [&](const char* name, unsigned places) {
 				return PaperAccount::scaled_decimal(account->getString(name), places);
 			};
-			rules.multiplier = exact("multiplier", 0); rules.tick = exact("tick", 6);
-			rules.upper_limit = exact("upper_limit", 6); rules.lower_limit = exact("lower_limit", 6);
-			rules.margin_rate = {exact("long_margin_rate", 8), exact("short_margin_rate", 8)};
-			const char* names[] = {"open", "today", "yesterday"};
-			for (size_t index = 0; index != 3; ++index)
-			{
-				std::string prefix = names[index];
-				rules.fees[index] = {exact((prefix + "_fee_per_lot").c_str(), 6), exact((prefix + "_fee_rate").c_str(), 8)};
-			}
 			_paper.reset(new PaperAccount(rules, exact("initial_cash", 2), exact("mark", 6)));
 			_auto_order_id = _auto_trade_id = _auto_entrust_id = 0;
 		}
@@ -821,6 +814,23 @@ int TraderMocker::login(const char* user, const char* pass, const char* productI
 	});
 
 	return 0;
+}
+
+PaperAccount::Rules TraderMocker::paper_rules(const std::function<std::string(const char*)>& value, uint32_t day)
+{
+	PaperAccount::Rules rules;
+	rules.contract = value("contract"); rules.source = value("source"); rules.trading_day = day;
+	auto exact = [&](const char* name, unsigned places) { return PaperAccount::scaled_decimal(value(name), places); };
+	rules.multiplier = exact("multiplier", 0); rules.tick = exact("tick", 6);
+	rules.upper_limit = exact("upper_limit", 6); rules.lower_limit = exact("lower_limit", 6);
+	rules.margin_rate = {exact("long_margin_rate", 8), exact("short_margin_rate", 8)};
+	const char* names[] = {"open", "today", "yesterday"};
+	for (size_t index = 0; index != 3; ++index)
+	{
+		std::string prefix = names[index];
+		rules.fees[index] = {exact((prefix + "_fee_per_lot").c_str(), 6), exact((prefix + "_fee_rate").c_str(), 8)};
+	}
+	return rules;
 }
 
 int TraderMocker::logout()

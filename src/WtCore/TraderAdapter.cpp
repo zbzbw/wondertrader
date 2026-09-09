@@ -16,6 +16,7 @@
 #include "../Includes/RiskMonDefs.h"
 
 #include <atomic>
+#include <algorithm>
 
 #include "../WTSTools/WTSLogger.h"
 
@@ -196,6 +197,9 @@ bool TraderAdapter::init(const char* id, WTSVariant* params, IBaseDataMgr* bdMgr
 	}
 
 	_remover = (FuncDeleteTrader)DLLHelper::get_symbol(hInst, "deleteTrader");
+	_mocker_live = reinterpret_cast<MockerControl>(DLLHelper::get_symbol(hInst, "wt_mocker_live"));
+	auto mockerAbi = reinterpret_cast<uint32_t (*)()>(DLLHelper::get_symbol(hInst, "wt_mocker_live_abi"));
+	if (_mocker_live && mockerAbi) _mocker_version = mockerAbi();
 
 	if (!_trader_api->init(params))
 	{
@@ -486,6 +490,7 @@ OrderMap* TraderAdapter::getOrders(const char* stdCode)
 
 uint32_t TraderAdapter::doEntrust(WTSEntrust* entrust)
 {
+	if (_live_controlled && !liveSendAllowed(entrust)) return UINT32_MAX;
 	_trader_api->makeEntrustID(entrust->getEntrustID(), 64);
 
 	WTSContractInfo* cInfo = entrust->getContractInfo();
@@ -499,13 +504,23 @@ uint32_t TraderAdapter::doEntrust(WTSEntrust* entrust)
 
 	entrust->setExchange(cInfo->getExchg());
 
-	uint32_t localid = makeLocalOrderID();
+	if (_live_controlled && _live_local_order == UINT32_MAX - 1)
+		throw std::overflow_error("Controlled local order IDs exhausted");
+	uint32_t localid = _live_controlled ? ++_live_local_order : makeLocalOrderID();
 	char* usertag = entrust->getUserTag();
 	wt_strcpy(usertag, _order_pattern.c_str(), _order_pattern.size());
 	usertag[_order_pattern.size()] =  '.';
 	fmtutil::format_to(usertag + _order_pattern.size() + 1, "{}", localid);
 	
+	if (_live_controlled)
+	{
+		if (!liveSendAllowed(entrust)) return UINT32_MAX;
+		_live_command->local_id = localid;
+		_live_command->entrust_id = entrust->getEntrustID();
+		_live_command->status = "unknown"; // Record the attempt before entering a possibly synchronous plugin.
+	}
 	int32_t ret = _trader_api->orderInsert(entrust);
+	if (_live_controlled && ret >= 0) _live_command->status = "submitted";
 	if(ret < 0)
 	{
 		WTSLogger::log_dyn("trader", _id.c_str(), LL_ERROR, "[{}] Order placing failed: {}", _id.c_str(), ret);
@@ -1243,6 +1258,14 @@ OrderIDs TraderAdapter::sell(const char* stdCode, double price, double qty, int 
 
 bool TraderAdapter::doCancel(WTSOrderInfo* ordInfo)
 {
+	if (_live_controlled)
+	{
+		if (!_live_connected || std::this_thread::get_id() != _live_owner || _live_cancel_local == UINT32_MAX) return false;
+		auto found = std::find_if(_live_commands.begin(), _live_commands.end(), [&](const auto& entry) {
+			return entry.second.local_id == _live_cancel_local && ordInfo && entry.second.entrust_id == ordInfo->getEntrustID();
+		});
+		if (found == _live_commands.end()) return false;
+	}
 	if (ordInfo == NULL || !ordInfo->isAlive())
 		return false;
 
@@ -1404,6 +1427,8 @@ uint32_t TraderAdapter::closeShort(const char* stdCode, double price, double qty
 #pragma region "ITraderSpi接口"
 void TraderAdapter::handleEvent(WTSTraderEvent e, int32_t ec)
 {
+	if (e == WTE_Close || ec != 0) { _live_connected = false; blockLive(); }
+	if (liveDeferred()) { deferLive([this, e, ec]() { handleEvent(e, ec); }); return; }
 	if(e == WTE_Connect)
 	{
 		if(ec == 0)
@@ -1417,6 +1442,7 @@ void TraderAdapter::handleEvent(WTSTraderEvent e, int32_t ec)
 	}
 	else if(e == WTE_Close)
 	{
+		_live_connected = false; blockLive();
 		WTSLogger::log_dyn("trader", _id.c_str(), LL_ERROR,"[{}] Trading channel disconnected: {}", _id.c_str(), ec);
 		for (auto sink : _sinks)
 			sink->on_channel_lost();
@@ -1425,6 +1451,12 @@ void TraderAdapter::handleEvent(WTSTraderEvent e, int32_t ec)
 
 void TraderAdapter::onLoginResult(bool bSucc, const char* msg, uint32_t tradingdate)
 {
+	if (!bSucc) { _live_connected = false; blockLive(); }
+	if (liveDeferred()) { std::string message = msg; deferLive([this, bSucc, message, tradingdate]() {
+		onLoginResult(bSucc, message.c_str(), tradingdate);
+	}); return; }
+	_live_connected = bSucc;
+	if (!bSucc) blockLive();
 	if(!bSucc)
 	{
 		_state = AS_LOGINFAILED;
@@ -1444,11 +1476,14 @@ void TraderAdapter::onLoginResult(bool bSucc, const char* msg, uint32_t tradingd
 
 void TraderAdapter::onLogout()
 {
-	
+	_live_connected = false; blockLive();
+	if (liveDeferred()) { deferLive([this]() { onLogout(); }); return; }
 }
 
 void TraderAdapter::onRspEntrust(WTSEntrust* entrust, WTSError *err)
 {
+	if (liveDeferred()) { auto copy0 = copyLive(entrust); auto copy1 = copyLive(err); deferLive([this, copy0, copy1]() { onRspEntrust(static_cast<WTSEntrust*>(copy0.get()), static_cast<WTSError*>(copy1.get())); }); return; }
+	if (_live_controlled) recordLiveReport("onRspEntrust", entrust, err);
 	if (err && err->getErrorCode() != WEC_NONE)
 	{
 		WTSLogger::log_dyn("trader", _id.c_str(), LL_ERROR, err->getMessage());
@@ -1513,6 +1548,8 @@ void TraderAdapter::onRspEntrust(WTSEntrust* entrust, WTSError *err)
 
 void TraderAdapter::onRspAccount(WTSArray* ayAccounts)
 {
+	if (liveDeferred()) { auto copy0 = copyLive(ayAccounts); deferLive([this, copy0]() { onRspAccount(static_cast<WTSArray*>(copy0.get())); }); return; }
+	if (_live_controlled) recordLiveReport("onRspAccount", ayAccounts, nullptr);
 	if (_save_data)
 	{
 		saveData(ayAccounts);
@@ -1544,6 +1581,8 @@ void TraderAdapter::onRspAccount(WTSArray* ayAccounts)
 
 void TraderAdapter::onRspPosition(const WTSArray* ayPositions)
 {
+	if (liveDeferred()) { auto copy0 = copyLive(ayPositions); deferLive([this, copy0]() { onRspPosition(static_cast<WTSArray*>(copy0.get())); }); return; }
+	if (_live_controlled) recordLiveReport("onRspPosition", ayPositions, nullptr);
 	if (ayPositions && ayPositions->size() > 0)
 	{
 		for (auto it = ayPositions->begin(); it != ayPositions->end(); it++)
@@ -1603,6 +1642,8 @@ void TraderAdapter::onRspPosition(const WTSArray* ayPositions)
 
 void TraderAdapter::onRspOrders(const WTSArray* ayOrders)
 {
+	if (liveDeferred()) { auto copy0 = copyLive(ayOrders); deferLive([this, copy0]() { onRspOrders(static_cast<WTSArray*>(copy0.get())); }); return; }
+	if (_live_controlled) recordLiveReport("onRspOrders", ayOrders, nullptr);
 	if (ayOrders)
 	{
 		if (_orders == NULL)
@@ -1738,6 +1779,8 @@ void TraderAdapter::printPosition(const char* code, const PosItem& pItem)
 
 void TraderAdapter::onRspTrades(const WTSArray* ayTrades)
 {
+	if (liveDeferred()) { auto copy0 = copyLive(ayTrades); deferLive([this, copy0]() { onRspTrades(static_cast<WTSArray*>(copy0.get())); }); return; }
+	if (_live_controlled) recordLiveReport("onRspTrades", ayTrades, nullptr);
 	if (ayTrades)
 	{
 		for (auto it = ayTrades->begin(); it != ayTrades->end(); it++)
@@ -1872,6 +1915,8 @@ inline const char* stateToName(WTSOrderState woState)
 
 void TraderAdapter::onPushOrder(WTSOrderInfo* orderInfo)
 {
+	if (liveDeferred()) { auto copy0 = copyLive(orderInfo); deferLive([this, copy0]() { onPushOrder(static_cast<WTSOrderInfo*>(copy0.get())); }); return; }
+	if (_live_controlled) recordLiveReport("onPushOrder", orderInfo, nullptr);
 	if (orderInfo == NULL)
 		return;
 
@@ -2147,6 +2192,8 @@ void TraderAdapter::onPushOrder(WTSOrderInfo* orderInfo)
 
 void TraderAdapter::onPushTrade(WTSTradeInfo* tradeRecord)
 {
+	if (liveDeferred()) { auto copy0 = copyLive(tradeRecord); deferLive([this, copy0]() { onPushTrade(static_cast<WTSTradeInfo*>(copy0.get())); }); return; }
+	if (_live_controlled) recordLiveReport("onPushTrade", tradeRecord, nullptr);
 	WTSContractInfo* cInfo = tradeRecord->getContractInfo();
 	if (cInfo == NULL)
 		return;
@@ -2336,6 +2383,10 @@ void TraderAdapter::onPushTrade(WTSTradeInfo* tradeRecord)
 
 void TraderAdapter::onTraderError(WTSError* err, void* pData /* = NULL */)
 {
+	if (liveDeferred()) { auto copy = copyLive(err); deferLive([this, copy]() {
+		onTraderError(static_cast<WTSError*>(copy.get()), nullptr);
+	}); return; }
+	if (_live_controlled) recordLiveReport("error", err, nullptr);
 	if(err)
 		WTSLogger::log_dyn("trader", _id.c_str(), LL_ERROR,"[{}] Error of trading channel occured: {}", _id.c_str(), err->getMessage());
 

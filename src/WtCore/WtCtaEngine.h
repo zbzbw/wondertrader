@@ -24,6 +24,10 @@ class WtCtaEngine : public WtEngine, public IExecuterStub
 public:
 	WtCtaEngine();
 	virtual ~WtCtaEngine();
+	void startControlled(uint32_t date, uint32_t time, uint32_t tradingDay, uint64_t event_ms, bool initialize = true);
+	void stepControlled(uint32_t date, uint32_t time, uint64_t event_ms);
+	std::string liveClockSnapshot() const;
+	void restoreLiveClock(const std::string& state);
 
 public:
 	//////////////////////////////////////////////////////////////////////////

@@ -38,6 +38,7 @@ public:
 	void controlled_begin_day(PaperAccount::Rules rules, int64_t mark);
 	std::string controlled_snapshot();
 	void controlled_restore(const std::string& state);
+	std::string controlled_request(const std::string& request);
 
 private:
 	/*
@@ -52,10 +53,12 @@ private:
 	void		save_positions();
 	std::unique_ptr<PaperAccount> _paper;
 	static int64_t paper_price(double price);
+	static PaperAccount::Rules paper_rules(const std::function<std::string(const char*)>& value, uint32_t day);
 	void controlled_owner() const;
 	std::thread::id _owner = std::this_thread::get_id();
 	uint64_t _input_seq = 0, _event_ms = 0;
 	bool _controlled_connected = false, _draining = false;
+	std::map<std::string, int64_t> _trade_fees;
 
 
 private:
