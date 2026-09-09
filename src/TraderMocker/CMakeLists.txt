@@ -9,6 +9,9 @@ SET(CMAKE_CXX_STANDARD 17)
 SET(SRC  
 	${PROJECT_SOURCE_DIR}/TraderMocker.cpp
 	${PROJECT_SOURCE_DIR}/TraderMocker.h
+	${PROJECT_SOURCE_DIR}/PaperAccount.cpp
+	${PROJECT_SOURCE_DIR}/PaperAccount.h
+	${PROJECT_SOURCE_DIR}/ControlledState.cpp
 )
 
 SET(LIBRARY_OUTPUT_PATH ${CMAKE_BINARY_DIR}/build_${PLATFORM}/${CMAKE_BUILD_TYPE}/bin)
@@ -38,8 +41,9 @@ ENDIF()
 TARGET_LINK_LIBRARIES(TraderMocker ${LIBS})
 
 # Explicit opt-in build target; excluded from normal runtime builds.
-ADD_EXECUTABLE(TraderMockerMatchingTest EXCLUDE_FROM_ALL tests/matching.cpp TraderMocker.cpp)
+ADD_EXECUTABLE(TraderMockerMatchingTest EXCLUDE_FROM_ALL tests/matching.cpp TraderMocker.cpp PaperAccount.cpp ControlledState.cpp)
 TARGET_LINK_LIBRARIES(TraderMockerMatchingTest ${LIBS})
+ADD_EXECUTABLE(TraderMockerAccountTest EXCLUDE_FROM_ALL tests/account.cpp PaperAccount.cpp)
 
 IF (MSVC)
 ELSE (GNUCC)

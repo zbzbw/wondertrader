@@ -18,9 +18,18 @@
     <ClCompile Include="TraderMocker.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
+    <ClCompile Include="PaperAccount.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="ControlledState.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="TraderMocker.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="PaperAccount.h">
       <Filter>头文件</Filter>
     </ClInclude>
   </ItemGroup>

@@ -20,9 +20,12 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="TraderMocker.cpp" />
+    <ClCompile Include="PaperAccount.cpp" />
+    <ClCompile Include="ControlledState.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="TraderMocker.h" />
+    <ClInclude Include="PaperAccount.h" />
   </ItemGroup>
   <PropertyGroup Label="Globals">
     <ProjectGuid>{711F8640-BBF0-4601-8278-46752890071A}</ProjectGuid>
