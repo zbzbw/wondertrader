@@ -140,7 +140,14 @@ public:
                 restore(d);
             } else if (operation == "step") {
                 if (!started || !connected) throw std::logic_error("Controlled runtime is not started and connected");
+                const bool observe = d.HasMember("observe_only") && d["observe_only"].IsBool() && d["observe_only"].GetBool();
+                if (observe && (mode != "broker_sim" || !stopping))
+                    throw std::logic_error("Input reconstruction requires a blocked external account");
+                // Reconstruct only local CTA/cache state after a broker query.
+                // The final trader gate and coordinator submit gate stay blocked.
+                if (observe) engine.controlledDecisions(true);
                 step(d, tick, bar);
+                if (observe) engine.controlledDecisions(false);
             } else if (operation != "snapshot") throw std::invalid_argument("Unsupported controlled operation");
             pump();
             if (operation == "step") trader->recordLiveReport("onInput", nullptr, nullptr);

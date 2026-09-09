@@ -33,6 +33,9 @@ input clock/cursor, command mappings and unacknowledged raw reports. The caller
 must commit its Python strategy/target/input state with this native cut before
 publishing reports. Paper may replay a journaled uncommitted input from its last
 complete cut; an external broker must only reconcile current facts.
+For a journaled broker input, step with `observe_only=true` reconstructs local
+CTA/cache state while both order gates remain blocked. The caller must discard
+execution targets during this reconstruction and never replay broker commands.
 
 Paper money is CNY cents, prices/per-lot fees use six decimal places and rates
 eight. Long/short and today/yesterday are separate, with no margin offset.
