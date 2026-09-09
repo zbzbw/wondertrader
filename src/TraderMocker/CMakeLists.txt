@@ -37,6 +37,10 @@ ELSE(GNUCC)
 ENDIF()
 TARGET_LINK_LIBRARIES(TraderMocker ${LIBS})
 
+# Explicit opt-in build target; excluded from normal runtime builds.
+ADD_EXECUTABLE(TraderMockerMatchingTest EXCLUDE_FROM_ALL tests/matching.cpp TraderMocker.cpp)
+TARGET_LINK_LIBRARIES(TraderMockerMatchingTest ${LIBS})
+
 IF (MSVC)
 ELSE (GNUCC)
 	SET_TARGET_PROPERTIES(TraderMocker PROPERTIES

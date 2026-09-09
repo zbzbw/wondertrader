@@ -12,6 +12,8 @@
 
 #include <boost/bind.hpp>
 #include <filesystem>
+#include <cmath>
+#include <stdexcept>
 namespace fs = std::filesystem;
 
 #include <rapidjson/document.h>
@@ -51,29 +53,15 @@ extern "C"
 
 std::vector<uint32_t> splitVolume(uint32_t vol, uint32_t minQty = 1, uint32_t maxQty = 100)
 {
-	uint32_t length = maxQty - minQty + 1;
 	std::vector<uint32_t> ret;
-	if (vol <= minQty)
+	if (minQty == 0 || maxQty < minQty)
+		throw std::invalid_argument("Invalid mocker fill quantity bounds");
+	// Stable maximum-sized whole-lot fills, with the final residual preserved.
+	while (vol > 0)
 	{
-		ret.emplace_back(vol);
-	}
-	else
-	{
-		uint32_t left = vol;
-		srand((uint32_t)time(NULL));
-		while (left > 0)
-		{
-			uint32_t curVol = minQty + (uint32_t)rand() % length;
-
-			if (curVol >= left)
-				curVol = left;
-
-			if (curVol == 0)
-				continue;
-
-			ret.emplace_back(curVol);
-			left -= curVol;
-		}
+		uint32_t curVol = (std::min)(vol, maxQty);
+		ret.emplace_back(curVol);
+		vol -= curVol;
 	}
 
 	return ret;
@@ -144,6 +132,7 @@ int TraderMocker::orderInsert(WTSEntrust* entrust)
 
 	entrust->retain();
 	_io_service.post([this, entrust](){
+		StdUniqueLock ordersLock(_mtx_awaits);
 		StdUniqueLock lock(_mutex_api);
 
 		WTSContractInfo* ct = entrust->getContractInfo();
@@ -327,6 +316,7 @@ int TraderMocker::orderInsert(WTSEntrust* entrust)
 
 int32_t TraderMocker::match_once()
 {
+	StdUniqueLock ordersLock(_mtx_awaits);
 	if (_terminated || _orders == NULL || _orders->size() == 0 || _ticks == NULL)
 		return 0;
 	
@@ -350,7 +340,6 @@ int32_t TraderMocker::match_once()
 		WTSTickData* curTick = (WTSTickData*)_ticks->grab(fullcode);
 		if (curTick && strcmp(curTick->code(), ct->getCode())==0)
 		{
-			StdUniqueLock lock(_mtx_awaits);
 			uint64_t tickTime = (uint64_t)curTick->actiondate() * 1000000000 + curTick->actiontime();
 			if (decimal::gt(curTick->price(), 0) /*&& tickTime >= _last_match_time*/)
 			{
@@ -358,10 +347,14 @@ int32_t TraderMocker::match_once()
 				//处理记录
 				std::vector<std::string> to_erase;
 
-				for (auto it = _awaits->begin(); it != _awaits->end(); it++)
+				double askLeft = curTick->askqty(0), bidLeft = curTick->bidqty(0);
+				// _orders is append-only in acceptance order; hash traversal is not FIFO.
+				for (uint32_t index = 0; index < _orders->size(); ++index)
 				{
-					WTSOrderInfo* ordInfo = (WTSOrderInfo*)it->second;
-					if (ordInfo->getVolLeft() == 0 || strcmp(ct->getCode(), curTick->code()) != 0)
+					WTSOrderInfo* ordInfo = (WTSOrderInfo*)_orders->at(index);
+					if (_awaits->get(ordInfo->getOrderID()) == NULL || ordInfo->getVolLeft() == 0
+						|| strcmp(ordInfo->getCode(), ct->getCode()) != 0
+						|| strcmp(ordInfo->getExchg(), ct->getExchg()) != 0)
 						continue;
 
 					bool isBuy = (ordInfo->getDirection() == WDT_LONG && ordInfo->getOffsetType() == WOT_OPEN) || (ordInfo->getDirection() != WDT_LONG && ordInfo->getOffsetType() != WOT_OPEN);
@@ -370,12 +363,12 @@ int32_t TraderMocker::match_once()
 					if (isBuy)
 					{
 						uPrice = curTick->askprice(0);
-						uVolume = curTick->askqty(0);
+						uVolume = askLeft;
 					}
 					else
 					{
 						uPrice = curTick->bidprice(0);
-						uVolume = curTick->bidqty(0);
+						uVolume = bidLeft;
 					}
 
 					if (decimal::eq(uVolume, 0))
@@ -420,7 +413,8 @@ int32_t TraderMocker::match_once()
 
 						//更新订单数据
 						ordInfo->setVolLeft(ordInfo->getVolLeft() - curVol);
-						ordInfo->setVolTraded(ordInfo->getVolTraded() - curVol);
+						ordInfo->setVolTraded(ordInfo->getVolTraded() + curVol);
+						(isBuy ? askLeft : bidLeft) -= curVol;
 						if (decimal::eq(ordInfo->getVolLeft(), 0))
 						{
 							ordInfo->setOrderState(WOS_AllTraded);
@@ -533,6 +527,10 @@ bool TraderMocker::init(WTSVariant *params)
 
 	if (decimal::eq(_min_qty, 0))
 		_min_qty = 1;
+	if (!std::isfinite(_min_qty) || !std::isfinite(_max_qty)
+		|| _min_qty < 1 || _max_qty < _min_qty || _max_qty > UINT32_MAX
+		|| std::floor(_min_qty) != _min_qty || std::floor(_max_qty) != _max_qty)
+		return false;
 
 	//加载持仓数据
 	std::stringstream ss;
@@ -768,6 +766,7 @@ int TraderMocker::orderAction(WTSEntrustAction* action)
 			if (_listener)
 				_listener->onTraderError(err);
 			err->release();
+			action->release();
 			return;
 		}
 
@@ -816,10 +815,9 @@ int TraderMocker::orderAction(WTSEntrustAction* action)
 			_listener->onPushOrder(ordInfo);
 		}
 
+		_awaits->remove(action->getOrderID());
 		ordInfo->release();
 		action->release();
-
-		_awaits->remove(action->getOrderID());
 
 		save_positions();
 	});

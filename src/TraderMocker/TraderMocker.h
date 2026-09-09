@@ -22,6 +22,7 @@ USING_NS_WTP;
  */
 class TraderMocker : public ITraderApi
 {
+	friend class TraderMockerMatchingTest;
 public:
 	TraderMocker();
 	~TraderMocker();
