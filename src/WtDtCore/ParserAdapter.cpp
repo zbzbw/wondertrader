@@ -206,7 +206,7 @@ bool ParserAdapter::init(const char* id, WTSVariant* cfg)
 
 void ParserAdapter::release()
 {
-	_stopped = true;
+	stop();
 	if (_parser_api)
 	{
 		_parser_api->release();
@@ -218,9 +218,14 @@ void ParserAdapter::release()
 		delete _parser_api;
 }
 
+void ParserAdapter::stop()
+{
+	_stopped.store(true);
+}
+
 bool ParserAdapter::run()
 {
-	if (_parser_api == NULL)
+	if (_parser_api == NULL || _stopped.load())
 		return false;
 
 	_parser_api->connect();
@@ -332,6 +337,14 @@ void ParserAdapterMgr::release()
 	}
 
 	_adapters.clear();
+}
+
+void ParserAdapterMgr::stop()
+{
+	for (auto it = _adapters.begin(); it != _adapters.end(); it++)
+	{
+		it->second->stop();
+	}
 }
 
 bool ParserAdapterMgr::addAdapter(const char* id, ParserAdapterPtr& adapter)

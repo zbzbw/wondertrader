@@ -22,6 +22,7 @@
 
 DataManager::DataManager()
 	: _writer(NULL)
+	, _writer_ready(false)
 	, _bd_mgr(NULL)
 	, _state_mon(NULL)
 {
@@ -79,7 +80,10 @@ bool DataManager::init(WTSVariant* params, WTSBaseDataMgr* bdMgr, StateMonitor* 
 		return false;
 	}
 
-	return _writer->init(params, this);
+	if (_writer == NULL)
+		return false;
+	_writer_ready = _writer->init(params, this);
+	return _writer_ready;
 }
 
 void DataManager::add_ext_dumper(const char* id, IHisDataDumper* dumper)
@@ -96,7 +100,26 @@ void DataManager::release()
 	{
 		_writer->release();
 		_remover(_writer);
+		_writer = NULL;
+		_writer_ready = false;
 	}
+}
+
+bool DataManager::stopAndFlush(DataWriterStopResult& result)
+{
+	if (_writer == NULL)
+		return false;
+	if (!_writer_ready)
+	{
+		release();
+		return false;
+	}
+
+	bool success = _writer->stopAndDrain(result);
+	_remover(_writer);
+	_writer = NULL;
+	_writer_ready = false;
+	return success;
 }
 
 bool DataManager::writeTick(WTSTickData* curTick, uint32_t procFlag)

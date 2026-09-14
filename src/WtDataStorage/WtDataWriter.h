@@ -6,9 +6,11 @@
 #include "../Share/StdUtils.hpp"
 #include "../Share/BoostMappingFile.hpp"
 #include "../Share/SpinMutex.hpp"
+#include "WriterDrainSync.hpp"
 
 #include <queue>
 #include <map>
+#include <atomic>
 
 typedef std::shared_ptr<BoostMappingFile> BoostMFPtr;
 
@@ -42,14 +44,15 @@ private:
 
 	bool	proc_block_data(const char* tag, std::string& content, bool isBar, bool bKeepHead = true);
 
-	void	procTick(WTSTickData* curTick, uint32_t procFlag);
-	void	procQueue(WTSOrdQueData* curOrdQue);
-	void	procOrder(WTSOrdDtlData* curOrdDetail);
-	void	procTrans(WTSTransData* curTrans);
+	bool	procTick(WTSTickData* curTick, uint32_t procFlag);
+	bool	procQueue(WTSOrdQueData* curOrdQue);
+	bool	procOrder(WTSOrdDtlData* curOrdDetail);
+	bool	procTrans(WTSTransData* curTrans);
 
 public:
 	virtual bool init(WTSVariant* params, IDataWriterSink* sink) override;
 	virtual void release() override;
+	virtual bool stopAndDrain(DataWriterStopResult& result) override;
 
 	virtual bool writeTick(WTSTickData* curTick, uint32_t procFlag) override;
 
@@ -184,6 +187,12 @@ private:
 	StdThreadPtr			_task_thrd;
 	StdUniqueMutex			_task_mtx;
 	StdCondVariable			_task_cond;
+	std::atomic<uint64_t>	_received_offset;
+	std::atomic<uint64_t>	_completed_offset;
+	std::atomic<uint64_t>	_persisted_offset;
+	std::atomic<bool>		_processing_failed;
+	bool					_accepting;
+	WriterDrainSync			_drain_sync;
 
 	std::string		_base_dir;
 	std::string		_cache_file;
@@ -195,7 +204,9 @@ private:
 	std::queue<std::string> _proc_que;
 	StdThreadPtr	_proc_thrd;
 	StdThreadPtr	_proc_chk;
-	bool			_terminated;
+	StdCondVariable	_check_cond;
+	StdUniqueMutex	_check_mtx;
+	bool			_released;
 
 	bool			_save_tick_log;
 	bool			_skip_notrade_tick;
@@ -221,10 +232,15 @@ private:
 
 private:
 	void loadCache();
+	bool pushTask(const TaskInfo& task);
+	bool beginSyncTask();
+	void completeTask(bool persisted);
+	bool flushFiles();
+	void releaseFiles();
 
 	bool updateCache(WTSContractInfo* ct, WTSTickData* curTick, uint32_t procFlag);
 
-	void pipeToTicks(WTSContractInfo* ct, WTSTickData* curTick);
+	bool pipeToTicks(WTSContractInfo* ct, WTSTickData* curTick);
 
 	void pipeToKlines(WTSContractInfo* ct, WTSTickData* curTick);
 
@@ -238,6 +254,5 @@ private:
 	template<typename T>
 	void	releaseBlock(T* block);
 
-	void pushTask(const TaskInfo& task);
 };
 

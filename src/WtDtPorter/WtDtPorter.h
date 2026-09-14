@@ -18,6 +18,10 @@ extern "C"
 
 	EXPORT_FLAG void		initialize(WtString cfgFile, WtString logCfg, bool bCfgFile, bool bLogCfgFile);
 	EXPORT_FLAG void		start(bool bAsync = false);
+	// request_stop only closes the reception gate. stop_and_flush must be
+	// called after start returns to obtain durable shutdown evidence.
+	EXPORT_FLAG bool		request_stop();
+	EXPORT_FLAG bool		stop_and_flush(WtDtStopResult* result);
 
 	EXPORT_FLAG	WtString	get_version();
 	EXPORT_FLAG	void		write_log(unsigned int level, const char* message, const char* catName);

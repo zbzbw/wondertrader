@@ -11,6 +11,7 @@
 #include <set>
 #include <vector>
 #include <memory>
+#include <atomic>
 #include <boost/core/noncopyable.hpp>
 #include "../Includes/IParserApi.h"
 
@@ -36,6 +37,7 @@ public:
 	bool	initExt(const char* id, IParserApi* api);
 
 	void	release();
+	void	stop();
 
 	bool	run();
 
@@ -63,7 +65,7 @@ private:
 	DataManager*		_dt_mgr;
 	IndexWorkerMgr*		_idx_fact;
 
-	bool				_stopped;
+	std::atomic<bool>	_stopped;
 
 	typedef wt_hashset<std::string>	ExchgFilter;
 	ExchgFilter			_filters;
@@ -77,6 +79,7 @@ typedef wt_hashmap<std::string, ParserAdapterPtr>	ParserAdapterMap;
 class ParserAdapterMgr : private boost::noncopyable
 {
 public:
+	void	stop();
 	void	release();
 
 	void	run();

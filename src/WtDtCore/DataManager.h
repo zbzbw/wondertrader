@@ -48,6 +48,7 @@ public:
 	}
 
 	void release();
+	bool stopAndFlush(DataWriterStopResult& result);
 
 	bool writeTick(WTSTickData* curTick, uint32_t procFlag);
 
@@ -92,6 +93,7 @@ public:
 private:
 	IDataWriter*		_writer;
 	FuncDeleteWriter	_remover;
+	bool				_writer_ready;
 	WTSBaseDataMgr*		_bd_mgr;
 	StateMonitor*		_state_mon;
 	std::vector<IDataCaster*>	_casters;
