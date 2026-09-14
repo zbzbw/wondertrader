@@ -11,6 +11,12 @@ ExpHftMocker::ExpHftMocker(HisDataReplayer* replayer, const char* name)
 
 }
 
+void ExpHftMocker::handle_tick(const char* stdCode, WTSTickData* curTick, uint32_t pxType)
+{
+	HftMocker::handle_tick(stdCode, curTick, pxType);
+	getRunner().on_post_tick(curTick->actiondate(), curTick->actiontime());
+}
+
 void ExpHftMocker::on_bar(const char* stdCode, const char* period, uint32_t times, WTSBarStruct* newBar)
 {
 	if (newBar == NULL)

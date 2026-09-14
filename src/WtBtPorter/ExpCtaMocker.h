@@ -19,6 +19,8 @@ public:
 	virtual ~ExpCtaMocker();
 
 public:
+	virtual void handle_tick(const char* stdCode, WTSTickData* curTick, uint32_t pxType = 0) override;
+
 	virtual void on_init() override;
 
 	virtual void on_session_begin(uint32_t uCurDate) override;

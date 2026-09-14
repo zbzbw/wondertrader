@@ -22,6 +22,12 @@ ExpCtaMocker::~ExpCtaMocker()
 {
 }
 
+void ExpCtaMocker::handle_tick(const char* stdCode, WTSTickData* curTick, uint32_t pxType)
+{
+	CtaMocker::handle_tick(stdCode, curTick, pxType);
+	getRunner().on_post_tick(curTick->actiondate(), curTick->actiontime());
+}
+
 void ExpCtaMocker::on_init()
 {
 	CtaMocker::on_init();

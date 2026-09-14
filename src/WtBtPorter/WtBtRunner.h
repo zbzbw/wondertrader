@@ -157,6 +157,12 @@ public:
 			_cb_evt(EVENT_BACKTEST_END, 0, 0);
 	}
 
+	inline void on_post_tick(uint32_t actionDate, uint32_t actionTime)
+	{
+		if (_cb_evt)
+			_cb_evt(EVENT_POST_TICK, actionDate, actionTime);
+	}
+
 private:
 	FuncStraInitCallback	_cb_cta_init;
 	FuncSessionEvtCallback	_cb_cta_sessevt;
