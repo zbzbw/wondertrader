@@ -1618,7 +1618,7 @@ uint64_t HisDataReplayer::getNextTickTime(uint32_t curTDate, uint64_t stime /* =
 			}
 		}
 
-		if (tickList._cursor >= tickList._count)
+		if (tickList._cursor > tickList._count)
 			continue;
 
 		uint32_t nextActionTime = tickList._items[tickList._cursor - 1].action_time;
