@@ -150,6 +150,8 @@ HisDataReplayer::HisDataReplayer()
 	, _cur_secs(0)
 	, _cur_tdate(0)
 	, _tick_enabled(true)
+	, _strict_tick_replay(false)
+	, _strict_replay_failed(false)
 	, _opened_tdate(0)
 	, _closed_tdate(0)
 	, _tick_simulated(true)
@@ -218,6 +220,10 @@ bool HisDataReplayer::init(WTSVariant* cfg, EventNotifier* notifier /* = NULL */
 
 	_tick_enabled = cfg->getBoolean("tick");
 	WTSLogger::info("Tick data replaying is {}", _tick_enabled ? "enabled" : "disabled");
+	_strict_tick_replay = cfg->getBoolean("strict_tick_replay");
+	_strict_replay_failed = false;
+	_strict_replay_error.clear();
+	WTSLogger::info("Strict tick replay is {}", _strict_tick_replay ? "enabled" : "disabled");
 
 	_adjust_flag = cfg->getUInt32("adjust_flag");
 	WTSLogger::info("adjust_flag is {}", _adjust_flag);
@@ -748,7 +754,36 @@ void HisDataReplayer::run_by_ticks(bool bNeedDump /* = false */)
 
 	while (_cur_tdate <= end_tdate && !_terminated)
 	{
-		if (checkAllTicks(_cur_tdate))
+		bool hasTicks = checkAllTicks(_cur_tdate);
+		if (_strict_tick_replay)
+		{
+			if (_tick_sub_map.empty())
+			{
+				_strict_replay_failed = true;
+				_strict_replay_error = "strict tick replay requires a tick subscription";
+			}
+			else
+			{
+				for (const auto& item : _tick_sub_map)
+				{
+					if (!checkTicks(item.first.c_str(), _cur_tdate))
+					{
+						_strict_replay_failed = true;
+						_strict_replay_error = fmt::format(
+							"strict tick input is missing or unreadable: {} on {}",
+							item.first, _cur_tdate);
+						break;
+					}
+				}
+			}
+			if (_strict_replay_failed)
+			{
+				WTSLogger::error("{}", _strict_replay_error);
+				_terminated = true;
+				break;
+			}
+		}
+		if (hasTicks)
 		{
 			WTSLogger::info("Start to replay tick data of {}...", _cur_tdate);
 			_listener->handle_session_begin(_cur_tdate);
@@ -851,7 +886,35 @@ void HisDataReplayer::run_by_bars(bool bNeedDump /* = false */)
 			}			
 
 			uint64_t curBarTime = (uint64_t)_cur_date * 10000 + _cur_time;
-			if (_tick_enabled)
+			if (_tick_enabled && _strict_tick_replay)
+			{
+				if (_tick_sub_map.empty())
+				{
+					_strict_replay_failed = true;
+					_strict_replay_error = "strict tick replay requires a tick subscription";
+					WTSLogger::error("{}", _strict_replay_error);
+					_terminated = true;
+					break;
+				}
+				for (const auto& item : _tick_sub_map)
+				{
+					if (!checkTicks(item.first.c_str(), _cur_tdate))
+					{
+						_strict_replay_failed = true;
+						_strict_replay_error = fmt::format(
+							"strict tick input is missing or unreadable: {} on {}",
+							item.first, _cur_tdate);
+						WTSLogger::error("{}", _strict_replay_error);
+						_terminated = true;
+						break;
+					}
+				}
+				if (_strict_replay_failed)
+					break;
+				replayHftDatas(curBarTime, nextBarTime);
+				_tick_simulated = false;
+			}
+			else if (_tick_enabled)
 			{
 				//如果开启了tick回放,则直接回放tick数据
 				//如果tick回放失败，说明tick数据不存在，则需要模拟tick

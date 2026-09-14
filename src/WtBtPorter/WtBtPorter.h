@@ -42,6 +42,8 @@ extern "C"
 	EXPORT_FLAG	void		set_time_range(WtUInt64 stime, WtUInt64 etime);
 
 	EXPORT_FLAG	void		enable_tick(bool bEnabled = true);
+	EXPORT_FLAG	int		get_replay_status();
+	EXPORT_FLAG	WtString	get_replay_error();
 
 	EXPORT_FLAG	CtxHandler	init_cta_mocker(const char* name, int slippage = 0, bool hook = false, bool persistData = true, bool bIncremental = false, bool bRatioSlp = false);
 
@@ -232,6 +234,7 @@ extern "C"
 	//////////////////////////////////////////////////////////////////////////
 //HFT策略接口
 #pragma  region "HFT接口"
+	EXPORT_FLAG	double		hft_get_fund_data(CtxHandler cHandle, int flag);
 
 	EXPORT_FLAG	double		hft_get_position(CtxHandler cHandle, const char* stdCode, bool bOnlyValid);
 

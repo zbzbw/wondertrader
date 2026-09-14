@@ -451,6 +451,8 @@ public:
 	inline bool	is_tick_enabled() const{ return _tick_enabled; }
 
 	inline bool	is_tick_simulated() const { return _tick_simulated; }
+	inline int32_t get_replay_status() const { return _strict_replay_failed ? -1 : 0; }
+	inline const char* get_replay_error() const { return _strict_replay_error.c_str(); }
 
 	inline void update_price(const char* stdCode, double price)
 	{
@@ -481,6 +483,9 @@ private:
 	std::string		_main_period;	//主周期
 	bool			_tick_enabled;	//是否开启了tick回测
 	bool			_tick_simulated;	//是否需要模拟tick
+	bool			_strict_tick_replay;	//严格tick回放，不允许OHLC模拟tick
+	bool			_strict_replay_failed;
+	std::string		_strict_replay_error;
 	bool			_align_by_section;	//重采样分钟线是否按小节对齐
 	
 	/*
