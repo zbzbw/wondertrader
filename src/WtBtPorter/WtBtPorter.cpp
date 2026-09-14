@@ -111,6 +111,16 @@ void enable_tick(bool bEnabled /* = true */)
 	getRunner().enable_tick(bEnabled);
 }
 
+int get_replay_status()
+{
+	return getRunner().replayer().get_replay_status();
+}
+
+WtString get_replay_error()
+{
+	return getRunner().replayer().get_replay_error();
+}
+
 void run_backtest(bool bNeedDump, bool bAsync)
 {
 	getRunner().run(bNeedDump, bAsync);
@@ -835,6 +845,15 @@ WtString sel_get_last_entertag(CtxHandler cHandle, const char* stdCode)
 #pragma endregion "SEL策略接口"
 
 #pragma region "HFT策略接口"
+double hft_get_fund_data(CtxHandler cHandle, int flag)
+{
+	HftMocker* mocker = getRunner().hft_mocker();
+	if (mocker == NULL)
+		return 0;
+
+	return mocker->stra_get_fund_data(flag);
+}
+
 double hft_get_position(CtxHandler cHandle, const char* stdCode, bool bOnlyValid)
 {
 	HftMocker* mocker = getRunner().hft_mocker();

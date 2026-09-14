@@ -29,6 +29,7 @@ static const WtUInt32	EVENT_SESSION_BEGIN		= 2;	//交易日开始
 static const WtUInt32	EVENT_SESSION_END		= 3;	//交易日结束
 static const WtUInt32	EVENT_ENGINE_SCHDL		= 4;	//框架调度
 static const WtUInt32	EVENT_BACKTEST_END		= 5;	//回测结束
+static const WtUInt32	EVENT_POST_TICK			= 6;	//tick完整处理结束
 
 //日志级别
 static const WtUInt32	LOG_LEVEL_DEBUG			= 0;

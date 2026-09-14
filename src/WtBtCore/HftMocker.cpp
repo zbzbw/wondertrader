@@ -919,6 +919,23 @@ double HftMocker::stra_get_position_profit(const char* stdCode)
 	return pInfo._dynprofit;
 }
 
+double HftMocker::stra_get_fund_data(int flag) const
+{
+	switch (flag)
+	{
+	case 0:
+		return _fund_info._total_profit + _fund_info._total_dynprofit - _fund_info._total_fees;
+	case 1:
+		return _fund_info._total_profit;
+	case 2:
+		return _fund_info._total_dynprofit;
+	case 3:
+		return _fund_info._total_fees;
+	default:
+		return 0.0;
+	}
+}
+
 double HftMocker::stra_get_position_avgpx(const char* stdCode)
 {
 	auto it = _pos_map.find(stdCode);

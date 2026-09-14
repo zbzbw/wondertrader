@@ -7,6 +7,8 @@ public:
 	ExpHftMocker(HisDataReplayer* replayer, const char* name);
 	virtual ~ExpHftMocker(){}
 
+	virtual void handle_tick(const char* stdCode, WTSTickData* curTick, uint32_t pxType) override;
+
 	virtual void on_bar(const char* stdCode, const char* period, uint32_t times, WTSBarStruct* newBar) override;
 
 

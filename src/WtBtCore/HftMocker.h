@@ -125,6 +125,7 @@ public:
 	virtual double stra_get_position_avgpx(const char* stdCode) override;
 
 	virtual double stra_get_position_profit(const char* stdCode) override;
+	double stra_get_fund_data(int flag = 0) const;
 
 	virtual double stra_get_undone(const char* stdCode) override;
 
