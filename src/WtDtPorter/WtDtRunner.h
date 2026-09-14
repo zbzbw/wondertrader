@@ -22,6 +22,8 @@
 #include "../WTSTools/WTSBaseDataMgr.h"
 
 #include <boost/asio.hpp>
+#include <atomic>
+#include <mutex>
 
 NS_WTP_BEGIN
 class WTSVariant;
@@ -36,6 +38,8 @@ public:
 public:
 	void	initialize(const char* cfgFile, const char* logCfg, const char* modDir = "", bool bCfgFile = true, bool bLogCfgFile = true);
 	void	start(bool bAsync = false, bool bAlldayMode = false);
+	bool	requestStop();
+	bool	stopAndFlush(WtDtStopResult& result);
 
 	bool	createExtParser(const char* id);
 
@@ -103,6 +107,9 @@ private:
 	typedef std::map<std::string, ExpDumperPtr>  ExpDumpers;
 	ExpDumpers		_dumpers;
 
-	bool _to_exit;
+	std::atomic<bool> _to_exit;
+	std::atomic<bool> _stop_requested;
+	std::mutex _stop_mtx;
+	bool _stop_completed;
 };
 

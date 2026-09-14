@@ -64,6 +64,18 @@ void start(bool bAsync/* = false*/)
 	getRunner().start(bAsync);
 }
 
+bool request_stop()
+{
+	return getRunner().requestStop();
+}
+
+bool stop_and_flush(WtDtStopResult* result)
+{
+	if (result == NULL)
+		return false;
+	return getRunner().stopAndFlush(*result);
+}
+
 const char* get_version()
 {
 	static std::string _ver;

@@ -22,6 +22,16 @@ NS_WTP_END
 
 USING_NS_WTP;
 
+typedef struct _WtDtStopResult
+{
+	uint8_t reception_stopped;
+	uint8_t writer_drained;
+	uint8_t checkpoint_persisted;
+	uint8_t reserved[5];
+	uint64_t received_offset;
+	uint64_t persisted_offset;
+} WtDtStopResult;
+
 //////////////////////////////////////////////////////////////////////////
 //扩展Parser回调函数
 static const WtUInt32	EVENT_PARSER_INIT = 1;	//Parser初始化

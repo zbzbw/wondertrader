@@ -12,6 +12,13 @@
 #include <boost/interprocess/file_mapping.hpp>
 #include <boost/interprocess/mapped_region.hpp>
 
+#ifdef _WIN32
+#include <fcntl.h>
+#include <io.h>
+#include <share.h>
+#include <sys/stat.h>
+#endif
+
 class BoostMappingFile
 {
 public:
@@ -38,10 +45,22 @@ public:
 		_map_region=NULL;
 	}
 
-	void sync()
+	bool sync()
 	{
-		if(_map_region)
-			_map_region->flush();
+		if(_map_region && !_map_region->flush(0, 0, false))
+			return false;
+#ifdef _WIN32
+		int file = -1;
+		if (_sopen_s(
+			&file, _file_name.c_str(), _O_RDWR | _O_BINARY,
+			_SH_DENYNO, _S_IREAD | _S_IWRITE) != 0)
+			return false;
+		bool flushed = _commit(file) == 0;
+		_close(file);
+		return flushed;
+#else
+		return true;
+#endif
 	}
 
 	void *addr()

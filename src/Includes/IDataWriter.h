@@ -25,6 +25,24 @@ struct WTSOrdDtlStruct;
 struct WTSOrdQueStruct;
 struct WTSTransStruct;
 
+struct DataWriterStopResult
+{
+	bool writer_drained;
+	bool checkpoint_persisted;
+	// Offsets count inputs accepted by this writer run. persisted_offset counts
+	// only inputs which produced their configured record and were durably flushed.
+	uint64_t received_offset;
+	uint64_t persisted_offset;
+
+	DataWriterStopResult()
+		: writer_drained(false)
+		, checkpoint_persisted(false)
+		, received_offset(0)
+		, persisted_offset(0)
+	{
+	}
+};
+
 class IDataWriterSink
 {
 public:
@@ -77,6 +95,13 @@ public:
 	virtual bool init(WTSVariant* params, IDataWriterSink* sink) { _sink = sink; return true; }
 
 	virtual void release() = 0;
+
+	// Storage modules which cannot prove a durable drain fail closed.
+	virtual bool stopAndDrain(DataWriterStopResult& result)
+	{
+		release();
+		return false;
+	}
 
 	void	add_ext_dumper(const char* id, IHisDataDumper* dumper) { _dumpers[id] = dumper; }
 

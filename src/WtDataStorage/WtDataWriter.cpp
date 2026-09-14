@@ -83,7 +83,12 @@ WtDataWriter::_TaskInfo::~_TaskInfo()
 
 
 WtDataWriter::WtDataWriter()
-	: _terminated(false)
+	: _received_offset(0)
+	, _completed_offset(0)
+	, _persisted_offset(0)
+	, _processing_failed(false)
+	, _accepting(true)
+	, _released(false)
 	, _save_tick_log(false)
 	, _log_group_size(1000)
 	, _disable_day(false)
@@ -176,12 +181,115 @@ bool WtDataWriter::init(WTSVariant* params, IDataWriterSink* sink)
 
 void WtDataWriter::release()
 {
-	_terminated = true;
-	if (_proc_thrd)
+	DataWriterStopResult ignored;
+	stopAndDrain(ignored);
+}
+
+bool WtDataWriter::stopAndDrain(DataWriterStopResult& result)
+{
+	uint64_t pending = 0;
 	{
-		_proc_cond.notify_all();
-		_proc_thrd->join();
+		StdUniqueLock lock(_task_mtx);
+		if (_released)
+			return false;
+		_accepting = false;
+		pending = _received_offset.load() - _completed_offset.load();
 	}
+	pipe_writer_log(_sink, LL_INFO, "Controlled stop draining {} accepted inputs", pending);
+
+	_drain_sync.terminate(_task_mtx, _task_cond);
+	_drain_sync.terminate(_proc_mtx, _proc_cond);
+	_drain_sync.terminate(_check_mtx, _check_cond);
+
+	if (_task_thrd && _task_thrd->joinable())
+		_task_thrd->join();
+	if (_proc_thrd && _proc_thrd->joinable())
+		_proc_thrd->join();
+	if (_proc_chk && _proc_chk->joinable())
+		_proc_chk->join();
+
+	{
+		StdUniqueLock lock(_task_mtx);
+		_task_cond.wait(lock, [this]() {
+			return _completed_offset.load() == _received_offset.load();
+		});
+		result.received_offset = _received_offset.load();
+		result.writer_drained = _tasks.empty()
+			&& _completed_offset.load() == result.received_offset;
+	}
+	{
+		StdUniqueLock lock(_proc_mtx);
+		result.writer_drained = result.writer_drained && _proc_que.empty();
+	}
+
+	bool files_persisted = result.writer_drained && flushFiles();
+	result.persisted_offset = files_persisted
+		? _persisted_offset.load()
+		: 0;
+	result.checkpoint_persisted = files_persisted && !_processing_failed.load();
+	bool success = result.writer_drained && result.checkpoint_persisted
+		&& result.received_offset == result.persisted_offset;
+	releaseFiles();
+	_released = true;
+	pipe_writer_log(_sink, success ? LL_INFO : LL_ERROR,
+		"Controlled stop completed: received offset {}, persisted offset {}",
+		result.received_offset, result.persisted_offset);
+	return success;
+}
+
+bool WtDataWriter::flushFiles()
+{
+	bool success = true;
+	auto sync_file = [&success](const BoostMFPtr& file) {
+		try
+		{
+			if (file && !file->sync())
+				success = false;
+		}
+		catch (...)
+		{
+			success = false;
+		}
+	};
+
+	sync_file(_tick_cache_file);
+	for (auto& item : _rt_ticks_blocks)
+	{
+		TickBlockPair* block = item.second;
+		if (block == NULL)
+			continue;
+		sync_file(block->_file);
+		if (block->_fstream)
+		{
+			try
+			{
+				block->_fstream->flush();
+			}
+			catch (...)
+			{
+				success = false;
+			}
+			if (!block->_fstream->good())
+				success = false;
+		}
+	}
+	for (auto& item : _rt_trans_blocks)
+		if (item.second) sync_file(item.second->_file);
+	for (auto& item : _rt_orddtl_blocks)
+		if (item.second) sync_file(item.second->_file);
+	for (auto& item : _rt_ordque_blocks)
+		if (item.second) sync_file(item.second->_file);
+	for (auto& item : _rt_min1_blocks)
+		if (item.second) sync_file(item.second->_file);
+	for (auto& item : _rt_min5_blocks)
+		if (item.second) sync_file(item.second->_file);
+	return success;
+}
+
+void WtDataWriter::releaseFiles()
+{
+	_tick_cache_block = NULL;
+	_tick_cache_file.reset();
 
 	for(auto& v : _rt_ticks_blocks)
 	{
@@ -212,6 +320,12 @@ void WtDataWriter::release()
 	{
 		delete v.second;
 	}
+	_rt_ticks_blocks.clear();
+	_rt_trans_blocks.clear();
+	_rt_orddtl_blocks.clear();
+	_rt_ordque_blocks.clear();
+	_rt_min1_blocks.clear();
+	_rt_min5_blocks.clear();
 }
 
 /*
@@ -369,15 +483,24 @@ bool WtDataWriter::writeTick(WTSTickData* curTick, uint32_t procFlag)
 		return false;
 
 	if (_async_proc)
-		pushTask(TaskInfo(curTick, 0, procFlag));
+		return pushTask(TaskInfo(curTick, 0, procFlag));
 	else
-		procTick(curTick, procFlag);
+	{
+		if (!beginSyncTask())
+			return false;
+		bool persisted = false;
+		try { persisted = procTick(curTick, procFlag); }
+		catch (...) { _processing_failed.store(true); }
+		completeTask(persisted);
+		return persisted;
+	}
 
 	return true;
 }
 
-void WtDataWriter::procTick(WTSTickData* curTick, uint32_t procFlag)
+bool WtDataWriter::procTick(WTSTickData* curTick, uint32_t procFlag)
 {
+	bool persisted = false;
 	do
 	{
 		WTSContractInfo* ct = curTick->getContractInfo();
@@ -395,8 +518,8 @@ void WtDataWriter::procTick(WTSTickData* curTick, uint32_t procFlag)
 			break;
 
 		//写到tick缓存
-		if (!_disable_tick)
-			pipeToTicks(ct, curTick);
+		if (!_disable_tick && !pipeToTicks(ct, curTick))
+			break;
 
 		//写到K线缓存
 		pipeToKlines(ct, curTick);
@@ -410,7 +533,9 @@ void WtDataWriter::procTick(WTSTickData* curTick, uint32_t procFlag)
 		{
 			pipe_writer_log(_sink, LL_INFO, "{} ticks received from exchange {}", cnt, curTick->exchg());
 		}
+		persisted = true;
 	} while (false);
+	return persisted;
 }
 
 bool WtDataWriter::writeOrderQueue(WTSOrdQueData* curOrdQue)
@@ -419,15 +544,24 @@ bool WtDataWriter::writeOrderQueue(WTSOrdQueData* curOrdQue)
 		return false;
 
 	if (_async_proc)
-		pushTask(TaskInfo(curOrdQue, 1));
+		return pushTask(TaskInfo(curOrdQue, 1));
 	else
-		procQueue(curOrdQue);
+	{
+		if (!beginSyncTask())
+			return false;
+		bool persisted = false;
+		try { persisted = procQueue(curOrdQue); }
+		catch (...) { _processing_failed.store(true); }
+		completeTask(persisted);
+		return persisted;
+	}
 
 	return true;
 }
 
-void WtDataWriter::procQueue(WTSOrdQueData* curOrdQue)
+bool WtDataWriter::procQueue(WTSOrdQueData* curOrdQue)
 {
+	bool persisted = false;
 	do
 	{
 		WTSContractInfo* ct = curOrdQue->getContractInfo();
@@ -464,7 +598,9 @@ void WtDataWriter::procQueue(WTSOrdQueData* curOrdQue)
 		{
 			pipe_writer_log(_sink, LL_INFO, "{} queues received from exchange {}", cnt, curOrdQue->exchg());
 		}
+		persisted = true;
 	} while (false);
+	return persisted;
 }
 
 bool WtDataWriter::writeOrderDetail(WTSOrdDtlData* curOrdDtl)
@@ -473,15 +609,24 @@ bool WtDataWriter::writeOrderDetail(WTSOrdDtlData* curOrdDtl)
 		return false;
 
 	if (_async_proc)
-		pushTask(TaskInfo(curOrdDtl, 2));
+		return pushTask(TaskInfo(curOrdDtl, 2));
 	else
-		procOrder(curOrdDtl);
+	{
+		if (!beginSyncTask())
+			return false;
+		bool persisted = false;
+		try { persisted = procOrder(curOrdDtl); }
+		catch (...) { _processing_failed.store(true); }
+		completeTask(persisted);
+		return persisted;
+	}
 
 	return true;
 }
 
-void WtDataWriter::procOrder(WTSOrdDtlData* curOrdDtl)
+bool WtDataWriter::procOrder(WTSOrdDtlData* curOrdDtl)
 {
+	bool persisted = false;
 	do
 	{
 		WTSContractInfo* ct = curOrdDtl->getContractInfo();
@@ -518,7 +663,9 @@ void WtDataWriter::procOrder(WTSOrdDtlData* curOrdDtl)
 		{
 			pipe_writer_log(_sink, LL_INFO, "{} orders received from exchange {}", cnt, curOrdDtl->exchg());
 		}
+		persisted = true;
 	} while (false);
+	return persisted;
 }
 
 bool WtDataWriter::writeTransaction(WTSTransData* curTrans)
@@ -527,15 +674,24 @@ bool WtDataWriter::writeTransaction(WTSTransData* curTrans)
 		return false;
 
 	if (_async_proc)
-		pushTask(TaskInfo(curTrans, 3));
+		return pushTask(TaskInfo(curTrans, 3));
 	else
-		procTrans(curTrans);
+	{
+		if (!beginSyncTask())
+			return false;
+		bool persisted = false;
+		try { persisted = procTrans(curTrans); }
+		catch (...) { _processing_failed.store(true); }
+		completeTask(persisted);
+		return persisted;
+	}
 
 	return true;
 }
 
-void WtDataWriter::procTrans(WTSTransData* curTrans)
+bool WtDataWriter::procTrans(WTSTransData* curTrans)
 {
+	bool persisted = false;
 	do
 	{
 		WTSContractInfo* ct = curTrans->getContractInfo();
@@ -572,28 +728,55 @@ void WtDataWriter::procTrans(WTSTransData* curTrans)
 		{
 			pipe_writer_log(_sink, LL_INFO, "{} transactions received from exchange {}", cnt, curTrans->exchg());
 		}
+		persisted = true;
 	} while (false);
+	return persisted;
 }
 
-void WtDataWriter::pushTask(const TaskInfo& task)
+bool WtDataWriter::beginSyncTask()
+{
+	StdUniqueLock lock(_task_mtx);
+	if (!_accepting)
+		return false;
+	_received_offset.fetch_add(1);
+	return true;
+}
+
+void WtDataWriter::completeTask(bool persisted)
+{
+	_drain_sync.complete(
+		_task_mtx,
+		_task_cond,
+		_completed_offset,
+		_persisted_offset,
+		_processing_failed,
+		persisted);
+}
+
+bool WtDataWriter::pushTask(const TaskInfo& task)
 {
 	if (!_async_proc)
-		return;
+		return false;
 
 	StdUniqueLock lck(_task_mtx);
+	if (!_accepting)
+		return false;
 	_tasks.emplace(task);
+	_received_offset.fetch_add(1);
 	_task_cond.notify_all();
 
 	if (_task_thrd == NULL)
 	{
 		_task_thrd.reset(new StdThread([this]() {
-			while (!_terminated)
+			for (;;)
 			{
-				if (_tasks.empty())
 				{
 					StdUniqueLock lck(_task_mtx);
-					_task_cond.wait(_task_mtx);
-					continue;
+					_task_cond.wait(lck, [this]() {
+						return _drain_sync.terminated() || !_tasks.empty();
+					});
+					if (_tasks.empty() && _drain_sync.terminated())
+						break;
 				}
 
 				std::queue<TaskInfo> tempQueue;
@@ -605,27 +788,42 @@ void WtDataWriter::pushTask(const TaskInfo& task)
 				while (!tempQueue.empty())
 				{
 					TaskInfo& curTask = tempQueue.front();
-					switch (curTask._type)
+					bool persisted = false;
+					try
 					{
-					case 0: procTick((WTSTickData*)curTask._obj, curTask._flag); break;
-					case 1: procQueue((WTSOrdQueData*)curTask._obj); break;
-					case 2: procOrder((WTSOrdDtlData*)curTask._obj); break;
-					case 3: procTrans((WTSTransData*)curTask._obj); break;
-					default:
-						break;
+						switch (curTask._type)
+						{
+						case 0: persisted = procTick((WTSTickData*)curTask._obj, curTask._flag); break;
+						case 1: persisted = procQueue((WTSOrdQueData*)curTask._obj); break;
+						case 2: persisted = procOrder((WTSOrdDtlData*)curTask._obj); break;
+						case 3: persisted = procTrans((WTSTransData*)curTask._obj); break;
+						default: break;
+						}
+					}
+					catch (const std::exception& ex)
+					{
+						_processing_failed.store(true);
+						pipe_writer_log(_sink, LL_ERROR, "Exception while persisting input: {}", ex.what());
+					}
+					catch (...)
+					{
+						_processing_failed.store(true);
+						pipe_writer_log(_sink, LL_ERROR, "Unknown exception while persisting input");
 					}
 					tempQueue.pop();
+					completeTask(persisted);
 				}
 			}
 		}));
 	}
+	return true;
 }
 
-void WtDataWriter::pipeToTicks(WTSContractInfo* ct, WTSTickData* curTick)
+bool WtDataWriter::pipeToTicks(WTSContractInfo* ct, WTSTickData* curTick)
 {
 	TickBlockPair* pBlockPair = getTickBlock(ct, curTick->tradingdate());
 	if (pBlockPair == NULL)
-		return;
+		return false;
 
 	SpinLock lock(pBlockPair->_mutex);
 
@@ -642,7 +840,7 @@ void WtDataWriter::pipeToTicks(WTSContractInfo* ct, WTSTickData* curTick)
 	if (blk == NULL)
 	{
 		pipe_writer_log(_sink, LL_DEBUG, "RT tick block of {} is not valid", ct->getFullCode());
-		return;
+		return false;
 	}
 
 	memcpy(&blk->_ticks[blk->_size], &curTick->getTickStruct(), sizeof(WTSTickStruct));
@@ -662,7 +860,10 @@ void WtDataWriter::pipeToTicks(WTSContractInfo* ct, WTSTickData* curTick)
 			<< curTick->volume() << ","
 			<< curTick->additional() << ","
 			<< (uint64_t)curTick->turnover() << std::endl;
+		if (!pBlockPair->_fstream->good())
+			return false;
 	}
+	return true;
 }
 
 WtDataWriter::OrdQueBlockPair* WtDataWriter::getOrdQueBlock(WTSContractInfo* ct, uint32_t curDate, bool bAutoCreate /* = true */)
@@ -1616,9 +1817,16 @@ void WtDataWriter::transHisData(const char* sid)
 void WtDataWriter::check_loop()
 {
 	uint32_t expire_secs = 600;
-	while(!_terminated)
+	while(!_drain_sync.terminated())
 	{
-		std::this_thread::sleep_for(std::chrono::seconds(10));
+		{
+			StdUniqueLock lock(_check_mtx);
+			_check_cond.wait_for(lock, std::chrono::seconds(10), [this]() {
+				return _drain_sync.terminated();
+			});
+		}
+		if (_drain_sync.terminated())
+			break;
 		/*
 		 *	By Wesley @ 2022.04.18
 		 *	如果收盘作业线程已经启动，则直接退出检查线程
@@ -2215,13 +2423,15 @@ uint32_t WtDataWriter::dump_bars_to_file(WTSContractInfo* ct)
 
 void WtDataWriter::proc_loop()
 {
-	while (!_terminated)
+	for (;;)
 	{
-		if(_proc_que.empty())
 		{
 			StdUniqueLock lock(_proc_mtx);
-			_proc_cond.wait(_proc_mtx);
-			continue;
+			_proc_cond.wait(lock, [this]() {
+				return _drain_sync.terminated() || !_proc_que.empty();
+			});
+			if (_proc_que.empty() && _drain_sync.terminated())
+				break;
 		}
 
 		std::string fullcode;

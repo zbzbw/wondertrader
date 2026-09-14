@@ -32,6 +32,8 @@ WtDtRunner::WtDtRunner()
 	, _dumper_for_orddtl(NULL)
 	, _dumper_for_trans(NULL)
 	, _to_exit(false)
+	, _stop_requested(false)
+	, _stop_completed(false)
 {
 }
 
@@ -42,18 +44,23 @@ WtDtRunner::~WtDtRunner()
 
 void WtDtRunner::start(bool bAsync /* = false */, bool bAlldayMode /* = false */)
 {
-	_parsers.run();
+	{
+		std::lock_guard<std::mutex> lock(_stop_mtx);
+		if (_stop_requested.load())
+			return;
+		_parsers.run();
+	}
 
     if(!bAsync)
     {
 		install_signal_hooks([this](const char* message) {
-			if(!_to_exit)
+			if(!_to_exit.load())
 				WTSLogger::error(message);
 		}, [this](bool toExit) {
-			if (_to_exit)
+			if (_to_exit.load())
 				return;
-			_to_exit = toExit;
-			WTSLogger::info("Exit flag is {}", _to_exit);
+			_to_exit.store(toExit);
+			WTSLogger::info("Exit flag is {}", _to_exit.load());
 		});
 
 		_async_io.post([this, bAlldayMode]() {
@@ -65,7 +72,7 @@ void WtDtRunner::start(bool bAsync /* = false */, bool bAlldayMode /* = false */
 		});
 
 		StdThread trd([this] {
-			while (!_to_exit)
+			while (!_to_exit.load())
 			{
 				std::this_thread::sleep_for(std::chrono::milliseconds(2));
 				_async_io.run_one();
@@ -73,6 +80,7 @@ void WtDtRunner::start(bool bAsync /* = false */, bool bAlldayMode /* = false */
 		});
 
 		trd.join();
+		requestStop();
     }
 	else
 	{
@@ -434,4 +442,49 @@ bool WtDtRunner::dumpHisTrans(const char* id, const char* stdCode, uint32_t uDat
 	}
 
 	return _dumper_for_trans(id, stdCode, uDate, items, count);
+}
+
+bool WtDtRunner::requestStop()
+{
+	std::lock_guard<std::mutex> lock(_stop_mtx);
+	_stop_requested.store(true);
+	_to_exit.store(true);
+	_parsers.stop();
+	return true;
+}
+
+bool WtDtRunner::stopAndFlush(WtDtStopResult& result)
+{
+	memset(&result, 0, sizeof(result));
+	std::lock_guard<std::mutex> lock(_stop_mtx);
+	if (_stop_completed)
+		return false;
+
+	_stop_requested.store(true);
+	_to_exit.store(true);
+	_parsers.stop();
+	_parsers.release();
+	result.reception_stopped = 1;
+
+	_state_mon.stop();
+	DataWriterStopResult writer_result;
+	bool success = false;
+	try
+	{
+		success = _data_mgr.stopAndFlush(writer_result);
+	}
+	catch (const std::exception& ex)
+	{
+		WTSLogger::error("DataKit stop/flush failed: {}", ex.what());
+	}
+	catch (...)
+	{
+		WTSLogger::error("DataKit stop/flush failed with an unknown exception");
+	}
+	result.writer_drained = writer_result.writer_drained ? 1 : 0;
+	result.checkpoint_persisted = writer_result.checkpoint_persisted ? 1 : 0;
+	result.received_offset = writer_result.received_offset;
+	result.persisted_offset = writer_result.persisted_offset;
+	_stop_completed = true;
+	return success && result.reception_stopped != 0;
 }
