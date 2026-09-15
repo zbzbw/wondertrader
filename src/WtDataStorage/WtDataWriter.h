@@ -7,6 +7,7 @@
 #include "../Share/BoostMappingFile.hpp"
 #include "../Share/SpinMutex.hpp"
 #include "WriterDrainSync.hpp"
+#include "RecordingUnitDrain.hpp"
 
 #include <queue>
 #include <map>
@@ -63,6 +64,8 @@ public:
 	virtual bool writeTransaction(WTSTransData* curTrans) override;
 
 	virtual void transHisData(const char* sid) override;
+	virtual void beginSessionClose(const char* sid) override;
+	virtual void beginSessionOpen(const char* sid) override;
 	
 	virtual bool isSessionProceeded(const char* sid) override;
 
@@ -174,7 +177,11 @@ private:
 	{
 		WTSObject*	_obj;
 		uint64_t	_type;
-		uint32_t	_flag;		
+		uint32_t	_flag;
+		std::string _session_id;
+		std::string _fullcode;
+		uint32_t _trading_date;
+		std::string _unit_key;
 
 		_TaskInfo(WTSObject* data, uint64_t dtype, uint32_t flag = 0);
 
@@ -193,6 +200,7 @@ private:
 	std::atomic<bool>		_processing_failed;
 	bool					_accepting;
 	WriterDrainSync			_drain_sync;
+	RecordingUnitDrain		_unit_drain;
 
 	std::string		_base_dir;
 	std::string		_cache_file;
@@ -201,7 +209,34 @@ private:
 
 	StdCondVariable	_proc_cond;
 	StdUniqueMutex	_proc_mtx;
-	std::queue<std::string> _proc_que;
+	typedef struct _ClosingTask
+	{
+		std::string command;
+		std::string session_id;
+		std::string fullcode;
+		uint32_t trading_date;
+
+		_ClosingTask(const std::string& value = "")
+			: command(value), trading_date(0)
+		{
+		}
+	} ClosingTask;
+	typedef struct _UnitCloseResult
+	{
+		bool persisted;
+		uint64_t row_count;
+		uint64_t file_size;
+		std::string dmb_path;
+		std::string dsb_path;
+		std::string dsb_fingerprint;
+
+		_UnitCloseResult()
+			: persisted(false), row_count(0), file_size(0)
+		{
+		}
+	} UnitCloseResult;
+	std::queue<ClosingTask> _proc_que;
+	std::map<std::string, std::map<std::string, UnitCloseResult>> _session_close_results;
 	StdThreadPtr	_proc_thrd;
 	StdThreadPtr	_proc_chk;
 	StdCondVariable	_check_cond;
@@ -233,10 +268,15 @@ private:
 private:
 	void loadCache();
 	bool pushTask(const TaskInfo& task);
-	bool beginSyncTask();
-	void completeTask(bool persisted);
+	bool beginSyncTask(TaskInfo& task);
+	void completeTask(const TaskInfo& task, bool persisted);
 	bool flushFiles();
 	void releaseFiles();
+	bool persistRecordingUnitFact(
+		const RecordingUnitProgress& unit,
+		const UnitCloseResult& close_result,
+		const std::string& marker_path,
+		uint32_t marker_value);
 
 	bool updateCache(WTSContractInfo* ct, WTSTickData* curTick, uint32_t procFlag);
 

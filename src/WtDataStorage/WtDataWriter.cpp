@@ -16,9 +16,69 @@
 
 #include <set>
 #include <algorithm>
+#include <cstdlib>
+#include <iomanip>
+
+#ifdef _WIN32
+#include <fcntl.h>
+#include <io.h>
+#else
+#include <fcntl.h>
+#include <unistd.h>
+#endif
+
+#include <rapidjson/stringbuffer.h>
+#include <rapidjson/writer.h>
 
 #include <boost/filesystem.hpp>
 namespace fs = boost::filesystem;
+
+namespace
+{
+bool flush_path(const std::string& path)
+{
+#ifdef _WIN32
+	int fd = -1;
+	if (_sopen_s(&fd, path.c_str(), _O_RDWR | _O_BINARY, _SH_DENYNO,
+		_S_IREAD | _S_IWRITE) != 0)
+		return false;
+	bool success = _commit(fd) == 0;
+	_close(fd);
+	return success;
+#else
+	int fd = open(path.c_str(), O_RDWR);
+	if (fd < 0)
+		return false;
+	bool success = fsync(fd) == 0;
+	close(fd);
+	return success;
+#endif
+}
+
+std::string file_fingerprint(const std::string& path)
+{
+	std::ifstream input(path, std::ios::binary);
+	if (!input.is_open())
+		return "";
+	uint64_t hash = 14695981039346656037ULL;
+	char buffer[64 * 1024];
+	while (input.good())
+	{
+		input.read(buffer, sizeof(buffer));
+		std::streamsize count = input.gcount();
+		for (std::streamsize index = 0; index < count; index++)
+		{
+			hash ^= static_cast<unsigned char>(buffer[index]);
+			hash *= 1099511628211ULL;
+		}
+	}
+	if (!input.eof())
+		return "";
+	std::ostringstream value;
+	value << std::hex << std::setfill('0') << std::setw(16) << hash;
+	return value.str();
+}
+}
 
 //By Wesley @ 2022.01.05
 #include "../Share/fmtlib.h"
@@ -63,14 +123,27 @@ const char CMD_CLEAR_CACHE[] = "CMD_CLEAR_CACHE";
 const char MARKER_FILE[] = "marker.ini";
 
 WtDataWriter::_TaskInfo::_TaskInfo(WTSObject* data, uint64_t dtype, uint32_t flag/* = 0*/)
-	: _type(dtype), _flag(flag)
+	: _type(dtype), _flag(flag), _trading_date(0)
 {
 	_obj = data;
 	_obj->retain();
+	if (_type == 0)
+	{
+		WTSTickData* tick = (WTSTickData*)_obj;
+		WTSContractInfo* ct = tick->getContractInfo();
+		if (ct != NULL && ct->getCommInfo() != NULL)
+		{
+			_session_id = ct->getCommInfo()->getSession();
+			_fullcode = ct->getFullCode();
+			_trading_date = tick->tradingdate();
+		}
+	}
 }
 
 WtDataWriter::_TaskInfo::_TaskInfo(const _TaskInfo& rhs)
 	: _type(rhs._type), _flag(rhs._flag)
+	, _session_id(rhs._session_id), _fullcode(rhs._fullcode)
+	, _trading_date(rhs._trading_date), _unit_key(rhs._unit_key)
 {
 	_obj = rhs._obj;
 	_obj->retain();
@@ -482,16 +555,20 @@ bool WtDataWriter::writeTick(WTSTickData* curTick, uint32_t procFlag)
 	if (curTick == NULL)
 		return false;
 
+	TaskInfo task(curTick, 0, procFlag);
+	if (task._session_id.empty() || !_sink->canSessionReceive(task._session_id.c_str()))
+		return false;
+
 	if (_async_proc)
-		return pushTask(TaskInfo(curTick, 0, procFlag));
+		return pushTask(task);
 	else
 	{
-		if (!beginSyncTask())
+		if (!beginSyncTask(task))
 			return false;
 		bool persisted = false;
 		try { persisted = procTick(curTick, procFlag); }
 		catch (...) { _processing_failed.store(true); }
-		completeTask(persisted);
+		completeTask(task, persisted);
 		return persisted;
 	}
 
@@ -505,12 +582,6 @@ bool WtDataWriter::procTick(WTSTickData* curTick, uint32_t procFlag)
 	{
 		WTSContractInfo* ct = curTick->getContractInfo();
 		if (ct == NULL)
-			break;
-
-		WTSCommodityInfo* commInfo = ct->getCommInfo();
-
-		//再根据状态过滤
-		if (!_sink->canSessionReceive(commInfo->getSession()))
 			break;
 
 		//先更新缓存
@@ -547,12 +618,13 @@ bool WtDataWriter::writeOrderQueue(WTSOrdQueData* curOrdQue)
 		return pushTask(TaskInfo(curOrdQue, 1));
 	else
 	{
-		if (!beginSyncTask())
+		TaskInfo task(curOrdQue, 1);
+		if (!beginSyncTask(task))
 			return false;
 		bool persisted = false;
 		try { persisted = procQueue(curOrdQue); }
 		catch (...) { _processing_failed.store(true); }
-		completeTask(persisted);
+		completeTask(task, persisted);
 		return persisted;
 	}
 
@@ -612,12 +684,13 @@ bool WtDataWriter::writeOrderDetail(WTSOrdDtlData* curOrdDtl)
 		return pushTask(TaskInfo(curOrdDtl, 2));
 	else
 	{
-		if (!beginSyncTask())
+		TaskInfo task(curOrdDtl, 2);
+		if (!beginSyncTask(task))
 			return false;
 		bool persisted = false;
 		try { persisted = procOrder(curOrdDtl); }
 		catch (...) { _processing_failed.store(true); }
-		completeTask(persisted);
+		completeTask(task, persisted);
 		return persisted;
 	}
 
@@ -677,12 +750,13 @@ bool WtDataWriter::writeTransaction(WTSTransData* curTrans)
 		return pushTask(TaskInfo(curTrans, 3));
 	else
 	{
-		if (!beginSyncTask())
+		TaskInfo task(curTrans, 3);
+		if (!beginSyncTask(task))
 			return false;
 		bool persisted = false;
 		try { persisted = procTrans(curTrans); }
 		catch (...) { _processing_failed.store(true); }
-		completeTask(persisted);
+		completeTask(task, persisted);
 		return persisted;
 	}
 
@@ -733,24 +807,31 @@ bool WtDataWriter::procTrans(WTSTransData* curTrans)
 	return persisted;
 }
 
-bool WtDataWriter::beginSyncTask()
+bool WtDataWriter::beginSyncTask(TaskInfo& task)
 {
 	StdUniqueLock lock(_task_mtx);
 	if (!_accepting)
+		return false;
+	if (task._type == 0 && !_unit_drain.accept(
+		task._session_id, task._fullcode, task._trading_date, task._unit_key))
 		return false;
 	_received_offset.fetch_add(1);
 	return true;
 }
 
-void WtDataWriter::completeTask(bool persisted)
+void WtDataWriter::completeTask(const TaskInfo& task, bool persisted)
 {
-	_drain_sync.complete(
-		_task_mtx,
-		_task_cond,
-		_completed_offset,
-		_persisted_offset,
-		_processing_failed,
-		persisted);
+	{
+		StdUniqueLock lock(_task_mtx);
+		_completed_offset.fetch_add(1);
+		if (persisted)
+			_persisted_offset.fetch_add(1);
+		else
+			_processing_failed.store(true);
+		if (!task._unit_key.empty())
+			_unit_drain.complete(task._unit_key, persisted);
+	}
+	_task_cond.notify_all();
 }
 
 bool WtDataWriter::pushTask(const TaskInfo& task)
@@ -761,7 +842,14 @@ bool WtDataWriter::pushTask(const TaskInfo& task)
 	StdUniqueLock lck(_task_mtx);
 	if (!_accepting)
 		return false;
-	_tasks.emplace(task);
+	TaskInfo accepted(task);
+	if (accepted._type == 0 && !_unit_drain.accept(
+		accepted._session_id,
+		accepted._fullcode,
+		accepted._trading_date,
+		accepted._unit_key))
+		return false;
+	_tasks.emplace(accepted);
 	_received_offset.fetch_add(1);
 	_task_cond.notify_all();
 
@@ -810,8 +898,8 @@ bool WtDataWriter::pushTask(const TaskInfo& task)
 						_processing_failed.store(true);
 						pipe_writer_log(_sink, LL_ERROR, "Unknown exception while persisting input");
 					}
+					completeTask(curTask, persisted);
 					tempQueue.pop();
-					completeTask(persisted);
 				}
 			}
 		}));
@@ -1769,6 +1857,21 @@ bool WtDataWriter::updateCache(WTSContractInfo* ct, WTSTickData* curTick, uint32
 
 void WtDataWriter::transHisData(const char* sid)
 {
+	if (strcmp(sid, CMD_CLEAR_CACHE) != 0)
+	{
+		beginSessionClose(sid);
+		StdUniqueLock task_lock(_task_mtx);
+		_task_cond.wait(task_lock, [this, sid]() {
+			return _unit_drain.isDrained(sid) || _drain_sync.terminated();
+		});
+		if (!_unit_drain.isDrained(sid))
+		{
+			pipe_writer_log(_sink, LL_ERROR,
+				"ClosingTask of session [{}] cancelled before accepted inputs drained", sid);
+			return;
+		}
+	}
+
 	StdUniqueLock lock(_proc_mtx);
 	if (strcmp(sid, CMD_CLEAR_CACHE) != 0)
 	{
@@ -1792,16 +1895,34 @@ void WtDataWriter::transHisData(const char* sid)
 			for (auto code : codes)
 			{
 				WTSContractInfo* ct = _bd_mgr->getContract(code.c_str(), exchg);
-				if(ct)
-					_proc_que.push(ct->getFullCode());
+				if (ct)
+				{
+					std::vector<RecordingUnitProgress> units;
+					{
+						StdUniqueLock task_lock(_task_mtx);
+						units = _unit_drain.units(sid);
+					}
+					for (const RecordingUnitProgress& unit : units)
+					{
+						if (unit.fullcode != ct->getFullCode())
+							continue;
+						ClosingTask task;
+						task.session_id = sid;
+						task.fullcode = unit.fullcode;
+						task.trading_date = unit.trading_date;
+						_proc_que.push(task);
+					}
+				}
 			}
 		}
 
-		_proc_que.push(fmtutil::format("MARK.{}", sid));
+		ClosingTask marker("MARK");
+		marker.session_id = sid;
+		_proc_que.push(marker);
 	}
 	else
 	{
-		_proc_que.push(sid);
+		_proc_que.push(ClosingTask(sid));
 	}
 
 	if (_proc_thrd == NULL)
@@ -2421,6 +2542,82 @@ uint32_t WtDataWriter::dump_bars_to_file(WTSContractInfo* ct)
 	return count;
 }
 
+bool WtDataWriter::persistRecordingUnitFact(
+	const RecordingUnitProgress& unit,
+	const UnitCloseResult& close_result,
+	const std::string& marker_path,
+	uint32_t marker_value)
+{
+	const char* raw_run_id = std::getenv("BWT_DATAKIT_RUN_ID");
+	const char* raw_subscription = std::getenv("BWT_DATAKIT_SUBSCRIPTION_IDENTITY");
+	std::string run_id = raw_run_id == NULL ? "" : raw_run_id;
+	std::string subscription = raw_subscription == NULL ? "" : raw_subscription;
+	if (run_id.empty() || subscription.empty()
+		|| run_id.find_first_of("/\\") != std::string::npos)
+		return false;
+
+	auto pos = unit.fullcode.find('.');
+	if (pos == std::string::npos)
+		return false;
+	std::string exchg = unit.fullcode.substr(0, pos);
+	std::string code = unit.fullcode.substr(pos + 1);
+	std::string raw_date = std::to_string(unit.trading_date);
+	if (raw_date.size() != 8)
+		return false;
+	std::string iso_date = raw_date.substr(0, 4) + "-" + raw_date.substr(4, 2)
+		+ "-" + raw_date.substr(6, 2);
+
+	rapidjson::StringBuffer buffer;
+	rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+	writer.StartObject();
+	writer.Key("version"); writer.Int(1);
+	writer.Key("status"); writer.String("complete");
+	writer.Key("source_session"); writer.String(run_id.c_str());
+	writer.Key("subscription_identity"); writer.String(subscription.c_str());
+	writer.Key("writer_session"); writer.String(unit.session_id.c_str());
+	writer.Key("instrument"); writer.String(unit.fullcode.c_str());
+	writer.Key("trading_date"); writer.String(iso_date.c_str());
+	writer.Key("accepted_offset"); writer.Uint64(unit.accepted);
+	writer.Key("completed_offset"); writer.Uint64(unit.completed);
+	writer.Key("persisted_offset"); writer.Uint64(unit.persisted);
+	writer.Key("writer_drained"); writer.Bool(true);
+	writer.Key("checkpoint_persisted"); writer.Bool(true);
+	writer.Key("dmb_path"); writer.String(close_result.dmb_path.c_str());
+	writer.Key("dsb_path"); writer.String(close_result.dsb_path.c_str());
+	writer.Key("dsb_row_count"); writer.Uint64(close_result.row_count);
+	writer.Key("dsb_size"); writer.Uint64(close_result.file_size);
+	writer.Key("dsb_fingerprint"); writer.String(close_result.dsb_fingerprint.c_str());
+	std::string marker_name = fs::path(marker_path).filename().string();
+	writer.Key("marker_path"); writer.String(marker_name.c_str());
+	writer.Key("marker_session"); writer.String(unit.session_id.c_str());
+	writer.Key("marker_value"); writer.Uint(marker_value);
+	writer.EndObject();
+
+	std::string directory = fmtutil::format(
+		"{}recording/units/{}/{}/{}/", _base_dir, run_id, raw_date, exchg);
+	try
+	{
+		fs::create_directories(directory);
+		std::string target = directory + code + ".json";
+		std::string temporary = target + ".tmp";
+		BoostFile file;
+		if (!file.create_new_file(temporary.c_str())
+			|| !file.write_file(buffer.GetString(), buffer.GetSize()))
+			return false;
+		file.close_file();
+		if (!flush_path(temporary))
+			return false;
+		if (StdFile::exists(target.c_str()))
+			fs::remove(target);
+		fs::rename(temporary, target);
+		return StdFile::exists(target.c_str());
+	}
+	catch (...)
+	{
+		return false;
+	}
+}
+
 void WtDataWriter::proc_loop()
 {
 	for (;;)
@@ -2434,11 +2631,11 @@ void WtDataWriter::proc_loop()
 				break;
 		}
 
-		std::string fullcode;
+		ClosingTask closing_task;
 		try
 		{
 			StdUniqueLock lock(_proc_mtx);
-			fullcode = _proc_que.front().c_str();
+			closing_task = _proc_que.front();
 			_proc_que.pop();
 		}
 		catch(std::exception& e)
@@ -2447,7 +2644,7 @@ void WtDataWriter::proc_loop()
 			continue;
 		}
 
-		if (fullcode.compare(CMD_CLEAR_CACHE) == 0)
+		if (closing_task.command.compare(CMD_CLEAR_CACHE) == 0)
 		{
 			//清理缓存
 			SpinLock lock(_lck_tick_cache);
@@ -2599,18 +2796,106 @@ void WtDataWriter::proc_loop()
 
 			continue;
 		}
-		else if (StrUtil::startsWith(fullcode.c_str(), "MARK.", false))
+		else if (closing_task.command == "MARK")
 		{
-			//如果指令以MARK.开头,说明是标记指令,要写一条标记
 			std::string filename = _base_dir + MARKER_FILE;
-			std::string sid = fullcode.substr(5);
+			std::string sid = closing_task.session_id;
 			uint32_t curDate = TimeUtils::getCurDate();
-			IniHelper iniHelper;
-			iniHelper.load(filename.c_str());
-			iniHelper.writeInt("markers", sid.c_str(), curDate);
-			iniHelper.save();
-			pipe_writer_log(_sink, LL_INFO, "ClosingTask mark of Trading session [{}] updated: {}", sid.c_str(), curDate);
+			std::vector<RecordingUnitProgress> units;
+			{
+				StdUniqueLock task_lock(_task_mtx);
+				units = _unit_drain.units(sid);
+			}
+			bool units_ready = true;
+			for (const RecordingUnitProgress& unit : units)
+			{
+				auto session_it = _session_close_results.find(sid);
+				if (session_it == _session_close_results.end())
+				{
+					units_ready = false;
+					break;
+				}
+				auto result_it = session_it->second.find(
+					RecordingUnitDrain::key(sid, unit.fullcode, unit.trading_date));
+				if (result_it == session_it->second.end()
+					|| !result_it->second.persisted || unit.failed
+					|| unit.completed != unit.accepted
+					|| unit.persisted != unit.accepted)
+				{
+					units_ready = false;
+					break;
+				}
+			}
+			if (!units_ready)
+			{
+				pipe_writer_log(_sink, LL_ERROR,
+					"ClosingTask marker of session [{}] withheld because a unit failed", sid);
+				continue;
+			}
+
+			bool marker_persisted = false;
+			try
+			{
+				IniHelper iniHelper;
+				iniHelper.load(filename.c_str());
+				iniHelper.writeInt("markers", sid.c_str(), curDate);
+				iniHelper.save();
+				marker_persisted = StdFile::exists(filename.c_str())
+					&& flush_path(filename);
+			}
+			catch (const std::exception& ex)
+			{
+				pipe_writer_log(_sink, LL_ERROR,
+					"ClosingTask marker of session [{}] failed: {}", sid, ex.what());
+			}
+			catch (...)
+			{
+				pipe_writer_log(_sink, LL_ERROR,
+					"ClosingTask marker of session [{}] failed", sid);
+			}
+			bool facts_persisted = marker_persisted;
+			for (const RecordingUnitProgress& unit : units)
+			{
+				auto session_it = _session_close_results.find(sid);
+				auto result_it = session_it->second.find(
+					RecordingUnitDrain::key(sid, unit.fullcode, unit.trading_date));
+				const UnitCloseResult& close_result = result_it->second;
+				if (!facts_persisted || !persistRecordingUnitFact(
+					unit, close_result, filename, curDate))
+				{
+					facts_persisted = false;
+					pipe_writer_log(_sink, LL_ERROR,
+						"Recording unit {} {} not completed", unit.fullcode, unit.trading_date);
+				}
+			}
+			if (facts_persisted)
+				_proc_date[sid] = curDate;
+			else if (marker_persisted)
+			{
+				try
+				{
+					IniHelper rollback;
+					rollback.load(filename.c_str());
+					auto previous = _proc_date.find(sid);
+					if (previous == _proc_date.end())
+						rollback.removeValue("markers", sid.c_str());
+					else
+						rollback.writeInt("markers", sid.c_str(), previous->second);
+					rollback.save();
+					flush_path(filename);
+				}
+				catch (...)
+				{
+					pipe_writer_log(_sink, LL_ERROR,
+						"ClosingTask marker rollback of session [{}] failed", sid);
+				}
+			}
+			pipe_writer_log(_sink, facts_persisted ? LL_INFO : LL_ERROR,
+				"ClosingTask marker of Trading session [{}] updated: {}", sid, curDate);
+			continue;
 		}
+
+		std::string fullcode = closing_task.fullcode;
 
 		auto pos = fullcode.find(".");
 		std::string exchg = fullcode.substr(0, pos);
@@ -2624,20 +2909,33 @@ void WtDataWriter::proc_loop()
 		{
 			uint32_t count = 0;
 
-			uint32_t uDate = _sink->getTradingDate(ct->getFullCode());
+			uint32_t uDate = closing_task.trading_date != 0
+				? closing_task.trading_date
+				: _sink->getTradingDate(ct->getFullCode());
+			std::string unit_key = RecordingUnitDrain::key(
+				closing_task.session_id, fullcode, uDate);
+			UnitCloseResult& unit_close =
+				_session_close_results[closing_task.session_id][unit_key];
+			unit_close.dmb_path = fmtutil::format(
+				"rt/ticks/{}/{}.dmb", ct->getExchg(), code);
 			//转移实时tick数据
 			if (!_disable_tick)
 			{
 				TickBlockPair *tBlkPair = getTickBlock(ct, uDate, false);
 				if (tBlkPair != NULL)
 				{
-					if (tBlkPair->_fstream)
-						tBlkPair->_fstream.reset();
-
 					if (tBlkPair->_block->_size > 0)
 					{
 						pipe_writer_log(_sink, LL_INFO, "Transfering tick data of {}...", fullcode.c_str());
 						SpinLock lock(tBlkPair->_mutex);
+						bool stream_ok = true;
+						if (tBlkPair->_fstream)
+						{
+							tBlkPair->_fstream->flush();
+							stream_ok = tBlkPair->_fstream->good();
+							tBlkPair->_fstream.reset();
+						}
+						bool dmb_ok = tBlkPair->_file && tBlkPair->_file->sync();
 
 						for (auto& item : _dumpers)
 						{
@@ -2658,6 +2956,9 @@ void WtDataWriter::proc_loop()
 							pipe_writer_log(_sink, LL_INFO, path.c_str());
 							fs::create_directories(ss.str().c_str());
 							std::string filename = fmtutil::format("{}{}.dsb", path, code);
+							unit_close.dsb_path = fmtutil::format(
+								"his/ticks/{}/{}/{}.dsb", ct->getExchg(),
+								tBlkPair->_block->_date, code);
 
 							bool bNew = false;
 							if (!StdFile::exists(filename.c_str()))
@@ -2665,7 +2966,7 @@ void WtDataWriter::proc_loop()
 
 							pipe_writer_log(_sink, LL_INFO, "Openning data storage file: {}", filename.c_str());
 							BoostFile f;
-							if (f.create_new_file(filename.c_str()))
+							if (stream_ok && dmb_ok && f.create_new_file(filename.c_str()))
 							{
 								//先压缩数据
 								std::string cmp_data = WTSCmpHelper::compress_data(tBlkPair->_block->_ticks, sizeof(WTSTickStruct)*tBlkPair->_block->_size);
@@ -2675,16 +2976,30 @@ void WtDataWriter::proc_loop()
 								header._type = BT_HIS_Ticks;
 								header._version = BLOCK_VERSION_CMP_V2;
 								header._size = cmp_data.size();
-								f.write_file(&header, sizeof(header));
+								bool wrote = f.write_file(&header, sizeof(header));
 
-								f.write_file(cmp_data.c_str(), cmp_data.size());
+								wrote = wrote && f.write_file(cmp_data.c_str(), cmp_data.size());
 								f.close_file();
-
-								count += tBlkPair->_block->_size;
-
-								//最后将缓存清空
-								//memset(tBlkPair->_block->_ticks, 0, sizeof(WTSTickStruct)*tBlkPair->_block->_size);
-								tBlkPair->_block->_size = 0;
+								wrote = wrote && flush_path(filename);
+								if (wrote)
+								{
+									uint32_t rows = tBlkPair->_block->_size;
+									tBlkPair->_block->_size = 0;
+									if (tBlkPair->_file->sync())
+									{
+										count += rows;
+										unit_close.row_count = rows;
+										unit_close.file_size = BoostFile::get_file_size(filename.c_str());
+										unit_close.dsb_fingerprint = file_fingerprint(filename);
+										unit_close.persisted = unit_close.file_size > 0
+											&& !unit_close.dsb_fingerprint.empty();
+									}
+									else
+									{
+										tBlkPair->_block->_size = rows;
+										tBlkPair->_file->sync();
+									}
+								}
 							}
 							else
 							{
@@ -2907,5 +3222,30 @@ void WtDataWriter::proc_loop()
 		{
 			pipe_writer_log(_sink, LL_INFO, "ClosingTask of {}[{}] skipped due to history data disabled", ct->getCode(), ct->getExchg());
 		}
+	}
+}
+
+void WtDataWriter::beginSessionClose(const char* sid)
+{
+	if (sid == NULL || sid[0] == '\0')
+		return;
+	{
+		StdUniqueLock lock(_task_mtx);
+		_unit_drain.closeSession(sid);
+	}
+	_task_cond.notify_all();
+}
+
+void WtDataWriter::beginSessionOpen(const char* sid)
+{
+	if (sid == NULL || sid[0] == '\0')
+		return;
+	{
+		StdUniqueLock lock(_task_mtx);
+		_unit_drain.openSession(sid);
+	}
+	{
+		StdUniqueLock lock(_proc_mtx);
+		_session_close_results.erase(sid);
 	}
 }
