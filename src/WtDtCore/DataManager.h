@@ -59,6 +59,8 @@ public:
 	bool writeTransaction(WTSTransData* curTrans);
 
 	void transHisData(const char* sid);
+	void beginSessionClose(const char* sid);
+	void beginSessionOpen(const char* sid);
 	
 	bool isSessionProceeded(const char* sid);
 

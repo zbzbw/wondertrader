@@ -223,6 +223,7 @@ void StateMonitor::run()
 							}
 							else if (offTime >= offCloseTime)
 							{
+								_dt_mgr->beginSessionClose(stateInfo->_session);
 								stateInfo->_state = SS_CLOSED;
 								WTSLogger::info("Trading session {}[{}] stopped receiving data", sInfo->name(), stateInfo->_session);
 							}
@@ -297,6 +298,7 @@ void StateMonitor::run()
 							uint32_t offCloseTime = sInfo->offsetTime(stateInfo->_close_time, false);
 							if (offTime >= offCloseTime)
 							{
+								_dt_mgr->beginSessionClose(stateInfo->_session);
 								stateInfo->_state = SS_CLOSED;
 
 								WTSLogger::info("Trading session {}[{}] stopped receiving data", sInfo->name(), stateInfo->_session);
@@ -398,7 +400,8 @@ void StateMonitor::run()
 						}
 						break;
 					case SS_PROCING:
-						stateInfo->_state = SS_PROCED;
+						if (_dt_mgr->isSessionProceeded(stateInfo->_session))
+							stateInfo->_state = SS_PROCED;
 						break;
 					case SS_PROCED:
 					case SS_Holiday:
@@ -431,6 +434,7 @@ void StateMonitor::run()
 
 								if(!isAllHoliday)
 								{
+									_dt_mgr->beginSessionOpen(stateInfo->_session);
 									stateInfo->_state = SS_ORIGINAL;
 									WTSLogger::info("Trading session {}[{}] state reset", sInfo->name(), stateInfo->_session);
 								}

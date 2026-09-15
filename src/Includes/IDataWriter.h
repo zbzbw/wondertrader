@@ -116,6 +116,11 @@ public:
 
 	virtual void transHisData(const char* sid) {}
 
+	// Establish the session reception boundary before StateMonitor changes its
+	// state. Already accepted inputs remain drainable; later inputs are rejected.
+	virtual void beginSessionClose(const char* sid) {}
+	virtual void beginSessionOpen(const char* sid) {}
+
 	virtual bool isSessionProceeded(const char* sid) { return true; }
 
 	virtual WTSTickData* getCurTick(const char* code, const char* exchg = "") = 0;
