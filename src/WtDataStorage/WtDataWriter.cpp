@@ -28,6 +28,7 @@
 #endif
 
 #include <rapidjson/stringbuffer.h>
+#include <rapidjson/document.h>
 #include <rapidjson/writer.h>
 
 #include <boost/filesystem.hpp>
@@ -77,6 +78,30 @@ std::string file_fingerprint(const std::string& path)
 	std::ostringstream value;
 	value << std::hex << std::setfill('0') << std::setw(16) << hash;
 	return value.str();
+}
+
+bool write_atomic_document(const std::string& target, const std::string& content)
+{
+	try
+	{
+		fs::create_directories(fs::path(target).parent_path());
+		std::string temporary = target + ".tmp";
+		BoostFile file;
+		if (!file.create_new_file(temporary.c_str())
+			|| !file.write_file(content.data(), content.size()))
+			return false;
+		file.close_file();
+		if (!flush_path(temporary))
+			return false;
+		if (StdFile::exists(target.c_str()))
+			fs::remove(target);
+		fs::rename(temporary, target);
+		return StdFile::exists(target.c_str());
+	}
+	catch (...)
+	{
+		return false;
+	}
 }
 }
 
@@ -242,6 +267,7 @@ bool WtDataWriter::init(WTSVariant* params, IDataWriterSink* sink)
 	}
 
 	loadCache();
+	restorePendingRecordingUnits();
 
 	_proc_chk.reset(new StdThread(boost::bind(&WtDataWriter::check_loop, this)));
 
@@ -296,10 +322,11 @@ bool WtDataWriter::stopAndDrain(DataWriterStopResult& result)
 	}
 
 	bool files_persisted = result.writer_drained && flushFiles();
-	result.persisted_offset = files_persisted
+	bool recovery_persisted = files_persisted && persistPendingRecordingUnits();
+	result.persisted_offset = recovery_persisted
 		? _persisted_offset.load()
 		: 0;
-	result.checkpoint_persisted = files_persisted && !_processing_failed.load();
+	result.checkpoint_persisted = recovery_persisted && !_processing_failed.load();
 	bool success = result.writer_drained && result.checkpoint_persisted
 		&& result.received_offset == result.persisted_offset;
 	releaseFiles();
@@ -399,6 +426,250 @@ void WtDataWriter::releaseFiles()
 	_rt_ordque_blocks.clear();
 	_rt_min1_blocks.clear();
 	_rt_min5_blocks.clear();
+}
+
+bool WtDataWriter::inspectTickDmb(
+	const std::string& fullcode,
+	DmbBoundary& boundary) const
+{
+	auto pos = fullcode.find('.');
+	if (pos == std::string::npos)
+		return false;
+	std::string exchg = fullcode.substr(0, pos);
+	std::string code = fullcode.substr(pos + 1);
+	boundary.relative_path = fmtutil::format(
+		"rt/ticks/{}/{}.dmb", exchg, code);
+	std::string path = _base_dir + boundary.relative_path;
+	if (!StdFile::exists(path.c_str()))
+		return true;
+
+	BoostFile file;
+	if (!file.open_existing_file(path.c_str(), bip::read_only))
+		return false;
+	RTTickBlock header = {};
+	if (!file.read_file(&header, sizeof(header)))
+		return false;
+	boundary.file_size = file.get_file_size();
+	uint64_t expected_size = sizeof(RTTickBlock)
+		+ static_cast<uint64_t>(header._capacity) * sizeof(WTSTickStruct);
+	if (strncmp(header._blk_flag, BLK_FLAG, strlen(BLK_FLAG)) != 0
+		|| header._type != BT_RT_Ticks
+		|| header._version != BLOCK_VERSION_RAW_V2
+		|| header._size > header._capacity
+		|| boundary.file_size != expected_size)
+		return false;
+	boundary.trading_date = header._date;
+	boundary.row_count = header._size;
+	if (boundary.row_count > 0)
+	{
+		WTSTickStruct last = {};
+		uint64_t offset = sizeof(RTTickBlock)
+			+ (boundary.row_count - 1) * sizeof(WTSTickStruct);
+		if (!file.set_file_pointer(static_cast<bip::offset_t>(offset), bip::file_begin)
+			|| !file.read_file(&last, sizeof(last))
+			|| strcmp(last.exchg, exchg.c_str()) != 0
+			|| strcmp(last.code, code.c_str()) != 0
+			|| last.trading_date != boundary.trading_date)
+			return false;
+	}
+	file.close_file();
+	boundary.fingerprint = file_fingerprint(path);
+	return !boundary.fingerprint.empty();
+}
+
+bool WtDataWriter::persistPendingRecordingUnits()
+{
+	std::vector<RecordingUnitProgress> units;
+	{
+		StdUniqueLock lock(_task_mtx);
+		units = _unit_drain.units();
+	}
+	if (units.empty())
+		return true;
+	const char* raw_run_id = std::getenv("BWT_DATAKIT_RUN_ID");
+	const char* raw_subscription = std::getenv("BWT_DATAKIT_SUBSCRIPTION_IDENTITY");
+	std::string run_id = raw_run_id == NULL ? "" : raw_run_id;
+	std::string subscription = raw_subscription == NULL ? "" : raw_subscription;
+	if (run_id.empty() || subscription.empty()
+		|| run_id.find_first_of("/\\") != std::string::npos)
+		return false;
+
+	for (const RecordingUnitProgress& unit : units)
+	{
+		if (unit.failed || unit.accepted != unit.completed
+			|| unit.accepted != unit.persisted)
+			return false;
+		DmbBoundary boundary;
+		if (!inspectTickDmb(unit.fullcode, boundary))
+			return false;
+		if (boundary.row_count == 0)
+		{
+			auto split = unit.fullcode.find('.');
+			std::string fact_path = fmtutil::format(
+				"{}recording/units/{}/{}/{}/{}.json",
+				_base_dir, run_id, unit.trading_date,
+				unit.fullcode.substr(0, split), unit.fullcode.substr(split + 1));
+			if (!StdFile::exists(fact_path.c_str()))
+				return false;
+			continue;
+		}
+		if (boundary.trading_date != unit.trading_date
+			|| boundary.row_count != unit.persisted)
+			return false;
+
+		rapidjson::StringBuffer buffer;
+		rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+		writer.StartObject();
+		writer.Key("version"); writer.Int(1);
+		writer.Key("status"); writer.String("pending_close");
+		writer.Key("source_session"); writer.String(run_id.c_str());
+		writer.Key("subscription_identity"); writer.String(subscription.c_str());
+		writer.Key("writer_session"); writer.String(unit.session_id.c_str());
+		writer.Key("instrument"); writer.String(unit.fullcode.c_str());
+		writer.Key("trading_date"); writer.Uint(unit.trading_date);
+		writer.Key("accepted_offset"); writer.Uint64(unit.accepted);
+		writer.Key("completed_offset"); writer.Uint64(unit.completed);
+		writer.Key("persisted_offset"); writer.Uint64(unit.persisted);
+		writer.Key("dmb_path"); writer.String(boundary.relative_path.c_str());
+		writer.Key("dmb_row_count"); writer.Uint64(boundary.row_count);
+		writer.Key("dmb_size"); writer.Uint64(boundary.file_size);
+		writer.Key("dmb_fingerprint"); writer.String(boundary.fingerprint.c_str());
+		writer.EndObject();
+
+		auto split = unit.fullcode.find('.');
+		std::string target = fmtutil::format(
+			"{}recording/pending/{}/{}/{}/{}.json",
+			_base_dir, run_id, unit.trading_date,
+			unit.fullcode.substr(0, split), unit.fullcode.substr(split + 1));
+		if (!write_atomic_document(
+			target, std::string(buffer.GetString(), buffer.GetSize())))
+			return false;
+	}
+	return true;
+}
+
+void WtDataWriter::restorePendingRecordingUnits()
+{
+	const char* raw_subscription = std::getenv("BWT_DATAKIT_SUBSCRIPTION_IDENTITY");
+	std::string subscription = raw_subscription == NULL ? "" : raw_subscription;
+	fs::path pending_root = fs::path(_base_dir) / "recording" / "pending";
+	if (subscription.empty() || !fs::is_directory(pending_root))
+		return;
+
+	try
+	{
+		for (fs::recursive_directory_iterator it(pending_root), end; it != end; ++it)
+		{
+			if (!fs::is_regular_file(it->path()) || it->path().extension() != ".json")
+				continue;
+			std::string content;
+			if (StdFile::read_file_content(it->path().string().c_str(), content) == 0)
+				continue;
+			rapidjson::Document document;
+			if (document.Parse(content.c_str()).HasParseError()
+				|| !document.IsObject()
+				|| !document.HasMember("version") || !document["version"].IsInt()
+				|| document["version"].GetInt() != 1
+				|| !document.HasMember("status") || !document["status"].IsString()
+				|| strcmp(document["status"].GetString(), "pending_close") != 0
+				|| !document.HasMember("subscription_identity")
+				|| !document["subscription_identity"].IsString()
+				|| subscription != document["subscription_identity"].GetString()
+				|| !document.HasMember("source_session")
+				|| !document["source_session"].IsString()
+				|| !document.HasMember("writer_session")
+				|| !document["writer_session"].IsString()
+				|| !document.HasMember("instrument") || !document["instrument"].IsString()
+				|| !document.HasMember("trading_date") || !document["trading_date"].IsUint()
+				|| !document.HasMember("accepted_offset") || !document["accepted_offset"].IsUint64()
+				|| !document.HasMember("completed_offset") || !document["completed_offset"].IsUint64()
+				|| !document.HasMember("persisted_offset") || !document["persisted_offset"].IsUint64()
+				|| !document.HasMember("dmb_row_count") || !document["dmb_row_count"].IsUint64()
+				|| !document.HasMember("dmb_size") || !document["dmb_size"].IsUint64()
+				|| !document.HasMember("dmb_fingerprint")
+				|| !document["dmb_fingerprint"].IsString()
+				|| !document.HasMember("dmb_path")
+				|| !document["dmb_path"].IsString())
+				continue;
+			std::string sid = document["writer_session"].GetString();
+			std::string source_session = document["source_session"].GetString();
+			std::string fullcode = document["instrument"].GetString();
+			uint32_t trading_date = document["trading_date"].GetUint();
+			uint64_t accepted = document["accepted_offset"].GetUint64();
+			uint64_t completed = document["completed_offset"].GetUint64();
+			uint64_t persisted = document["persisted_offset"].GetUint64();
+			auto split = fullcode.find('.');
+			fs::path relative = fs::relative(it->path(), pending_root);
+			if (source_session.empty() || split == std::string::npos
+				|| relative.generic_string() != fmtutil::format(
+					"{}/{}/{}/{}.json", source_session, trading_date,
+					fullcode.substr(0, split), fullcode.substr(split + 1)))
+				continue;
+			DmbBoundary boundary;
+			if (accepted != completed || accepted != persisted
+				|| persisted != document["dmb_row_count"].GetUint64()
+				|| !inspectTickDmb(fullcode, boundary)
+				|| boundary.trading_date != trading_date
+				|| boundary.row_count != persisted
+				|| boundary.file_size != document["dmb_size"].GetUint64()
+				|| boundary.fingerprint != document["dmb_fingerprint"].GetString()
+				|| boundary.relative_path != document["dmb_path"].GetString())
+				continue;
+			StdUniqueLock lock(_task_mtx);
+			_unit_drain.restore(sid, fullcode, trading_date, persisted);
+		}
+	}
+	catch (...)
+	{
+		pipe_writer_log(_sink, LL_ERROR,
+			"Failed to scan pending recording unit boundaries");
+	}
+}
+
+bool WtDataWriter::validateSessionDmbBoundaries(
+	const char* sid,
+	const std::vector<RecordingUnitProgress>& units) const
+{
+	CodeSet* comms = _sink->getSessionComms(sid);
+	if (comms == NULL)
+		return false;
+	for (const std::string& value : *comms)
+	{
+		const StringVector& parts = StrUtil::split(value, ".");
+		if (parts.size() != 2)
+			return false;
+		WTSCommodityInfo* commodity = _bd_mgr->getCommodity(
+			parts[0].c_str(), parts[1].c_str());
+		if (commodity == NULL)
+			continue;
+		for (const std::string& code : commodity->getCodes())
+		{
+			WTSContractInfo* contract = _bd_mgr->getContract(
+				code.c_str(), parts[0].c_str());
+			if (contract == NULL)
+				continue;
+			DmbBoundary boundary;
+			if (!inspectTickDmb(contract->getFullCode(), boundary))
+				return false;
+			if (boundary.row_count == 0)
+				continue;
+			bool matched = false;
+			for (const RecordingUnitProgress& unit : units)
+			{
+				if (unit.session_id == sid
+					&& unit.fullcode == contract->getFullCode()
+					&& unit.trading_date == boundary.trading_date
+					&& unit.persisted == boundary.row_count)
+				{
+					matched = true;
+					break;
+				}
+			}
+			if (!matched)
+				return false;
+		}
+	}
+	return true;
 }
 
 /*
@@ -1871,6 +2142,18 @@ void WtDataWriter::transHisData(const char* sid)
 			return;
 		}
 	}
+	std::vector<RecordingUnitProgress> closing_units;
+	{
+		StdUniqueLock task_lock(_task_mtx);
+		closing_units = _unit_drain.units(sid);
+	}
+	if (strcmp(sid, CMD_CLEAR_CACHE) != 0
+		&& !validateSessionDmbBoundaries(sid, closing_units))
+	{
+		pipe_writer_log(_sink, LL_ERROR,
+			"ClosingTask of session [{}] lacks a recoverable DMB boundary", sid);
+		return;
+	}
 
 	StdUniqueLock lock(_proc_mtx);
 	if (strcmp(sid, CMD_CLEAR_CACHE) != 0)
@@ -1897,12 +2180,7 @@ void WtDataWriter::transHisData(const char* sid)
 				WTSContractInfo* ct = _bd_mgr->getContract(code.c_str(), exchg);
 				if (ct)
 				{
-					std::vector<RecordingUnitProgress> units;
-					{
-						StdUniqueLock task_lock(_task_mtx);
-						units = _unit_drain.units(sid);
-					}
-					for (const RecordingUnitProgress& unit : units)
+					for (const RecordingUnitProgress& unit : closing_units)
 					{
 						if (unit.fullcode != ct->getFullCode())
 							continue;

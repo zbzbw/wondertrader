@@ -235,6 +235,19 @@ private:
 		{
 		}
 	} UnitCloseResult;
+	typedef struct _DmbBoundary
+	{
+		uint32_t trading_date;
+		uint64_t row_count;
+		uint64_t file_size;
+		std::string relative_path;
+		std::string fingerprint;
+
+		_DmbBoundary()
+			: trading_date(0), row_count(0), file_size(0)
+		{
+		}
+	} DmbBoundary;
 	std::queue<ClosingTask> _proc_que;
 	std::map<std::string, std::map<std::string, UnitCloseResult>> _session_close_results;
 	StdThreadPtr	_proc_thrd;
@@ -272,6 +285,14 @@ private:
 	void completeTask(const TaskInfo& task, bool persisted);
 	bool flushFiles();
 	void releaseFiles();
+	bool inspectTickDmb(
+		const std::string& fullcode,
+		DmbBoundary& boundary) const;
+	bool persistPendingRecordingUnits();
+	void restorePendingRecordingUnits();
+	bool validateSessionDmbBoundaries(
+		const char* sid,
+		const std::vector<RecordingUnitProgress>& units) const;
 	bool persistRecordingUnitFact(
 		const RecordingUnitProgress& unit,
 		const UnitCloseResult& close_result,

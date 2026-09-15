@@ -52,3 +52,17 @@ TEST(test_recording_unit_drain, next_cycle_reopens_without_reusing_old_counts)
 	ASSERT_EQ(units.size(), 1U);
 	EXPECT_EQ(units[0].trading_date, 20260916U);
 }
+
+TEST(test_recording_unit_drain, persisted_restart_boundary_is_restored_once)
+{
+	RecordingUnitDrain drain;
+	ASSERT_TRUE(drain.restore("SHFE", "SHFE.cu2609", 20260915, 2));
+	ASSERT_TRUE(drain.restore("SHFE", "SHFE.cu2609", 20260915, 2));
+	EXPECT_FALSE(drain.restore("SHFE", "SHFE.cu2609", 20260915, 3));
+	drain.closeSession("SHFE");
+	ASSERT_TRUE(drain.isDrained("SHFE"));
+	auto units = drain.units("SHFE");
+	ASSERT_EQ(units.size(), 1U);
+	EXPECT_EQ(units[0].accepted, 2U);
+	EXPECT_EQ(units[0].persisted, 2U);
+}

@@ -64,6 +64,29 @@ public:
 			it->second.failed = true;
 	}
 
+	bool restore(
+		const std::string& session_id,
+		const std::string& fullcode,
+		uint32_t trading_date,
+		uint64_t persisted)
+	{
+		std::string unit_key = key(session_id, fullcode, trading_date);
+		auto existing = _units.find(unit_key);
+		if (existing != _units.end())
+			return existing->second.accepted == persisted
+				&& existing->second.completed == persisted
+				&& existing->second.persisted == persisted
+				&& !existing->second.failed;
+		RecordingUnitProgress& unit = _units[unit_key];
+		unit.session_id = session_id;
+		unit.fullcode = fullcode;
+		unit.trading_date = trading_date;
+		unit.accepted = persisted;
+		unit.completed = persisted;
+		unit.persisted = persisted;
+		return true;
+	}
+
 	void closeSession(const std::string& session_id)
 	{
 		_closing_sessions.insert(session_id);
@@ -105,6 +128,14 @@ public:
 			if (item.second.session_id == session_id)
 				result.emplace_back(item.second);
 		}
+		return result;
+	}
+
+	std::vector<RecordingUnitProgress> units() const
+	{
+		std::vector<RecordingUnitProgress> result;
+		for (const auto& item : _units)
+			result.emplace_back(item.second);
 		return result;
 	}
 
