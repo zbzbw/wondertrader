@@ -12,10 +12,10 @@ SET(EXECUTABLE_OUTPUT_PATH ${CMAKE_BINARY_DIR}/build_${PLATFORM}/${CMAKE_BUILD_T
 file(GLOB SRCS *.cpp ./gtest/*.cc)
 
 SET(LIBS
+	WtDtCore
     WTSTools
 	WTSUtils
-	WtShareHelper
-	WtDtCore)
+	WtShareHelper)
 IF (MSVC)
 ELSE(GNUCC)
     LIST(APPEND LIBS pthread stdc++fs)
