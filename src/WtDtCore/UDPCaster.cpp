@@ -132,20 +132,27 @@ void UDPCaster::start(int sport)
 
 void UDPCaster::stop()
 {
-	m_bTerminated = true;
+	{
+		StdUniqueLock lock(m_mtxCast);
+		m_bTerminated = true;
+	}
+	m_condCast.notify_all();
+
 	m_ioservice.stop();
 	if (m_thrdIO)
 		m_thrdIO->join();
 
-	m_condCast.notify_all();
 	if (m_thrdCast)
 		m_thrdCast->join();
 
 	m_sktSubscribe.reset();
-	m_sktBroadcast.reset();
-	m_listFlatGroup.clear();
-	m_listJsonGroup.clear();
-	m_listRawGroup.clear();
+	{
+		StdUniqueLock lock(m_mtxCast);
+		m_sktBroadcast.reset();
+		m_listFlatGroup.clear();
+		m_listJsonGroup.clear();
+		m_listRawGroup.clear();
+	}
 }
 
 void UDPCaster::do_receive()
@@ -293,116 +300,114 @@ void UDPCaster::broadcast(WTSTransData* curTrans)
 
 void UDPCaster::do_broadcast(WTSObject* data, uint32_t dataType)
 {
-	if(m_sktBroadcast == NULL || data == NULL || m_bTerminated)
+	if(data == NULL)
 		return;
 
 	{
 		StdUniqueLock lock(m_mtxCast);
+		if (m_sktBroadcast == NULL || m_bTerminated)
+			return;
+
 		m_dataQue.push(CastData(data, dataType));
-	}
-
-	if(m_thrdCast == NULL)
-	{
-		m_thrdCast.reset(new StdThread([this](){
-
-			while (!m_bTerminated)
-			{
-				if(m_dataQue.empty())
+		if(m_thrdCast == NULL)
+		{
+			m_thrdCast.reset(new StdThread([this](){
+				for (;;)
 				{
-					StdUniqueLock lock(m_mtxCast);
-					m_condCast.wait(lock);
-					continue;
-				}	
-
-				std::queue<CastData> tmpQue;
-				{
-					StdUniqueLock lock(m_mtxCast);
-					tmpQue.swap(m_dataQue);
-				}
-				
-				while(!tmpQue.empty())
-				{
-					const CastData& castData = tmpQue.front();
-
-					if (castData._data == NULL)
-						break;
-
-					//直接广播
-					if (!m_listRawGroup.empty() || !m_listRawRecver.empty())
+					std::queue<CastData> tmpQue;
 					{
-						std::string buf_raw;
-						if (castData._datatype == UDP_MSG_PUSHTICK)
-						{
-							buf_raw.resize(sizeof(UDPTickPacket));
-							UDPTickPacket* pack = (UDPTickPacket*)buf_raw.data();
-							pack->_type = castData._datatype;
-							WTSTickData* curObj = (WTSTickData*)castData._data;
-							memcpy(&pack->_data, &curObj->getTickStruct(), sizeof(WTSTickStruct));
-						}
-						else if (castData._datatype == UDP_MSG_PUSHORDDTL)
-						{
-							buf_raw.resize(sizeof(UDPOrdDtlPacket));
-							UDPOrdDtlPacket* pack = (UDPOrdDtlPacket*)buf_raw.data();
-							pack->_type = castData._datatype;
-							WTSOrdDtlData* curObj = (WTSOrdDtlData*)castData._data;
-							memcpy(&pack->_data, &curObj->getOrdDtlStruct(), sizeof(WTSOrdDtlStruct));
-						}
-						else if (castData._datatype == UDP_MSG_PUSHORDQUE)
-						{
-							buf_raw.resize(sizeof(UDPOrdQuePacket));
-							UDPOrdQuePacket* pack = (UDPOrdQuePacket*)buf_raw.data();
-							pack->_type = castData._datatype;
-							WTSOrdQueData* curObj = (WTSOrdQueData*)castData._data;
-							memcpy(&pack->_data, &curObj->getOrdQueStruct(), sizeof(WTSOrdQueStruct));
-						}
-						else if (castData._datatype == UDP_MSG_PUSHTRANS)
-						{
-							buf_raw.resize(sizeof(UDPTransPacket));
-							UDPTransPacket* pack = (UDPTransPacket*)buf_raw.data();
-							pack->_type = castData._datatype;
-							WTSTransData* curObj = (WTSTransData*)castData._data;
-							memcpy(&pack->_data, &curObj->getTransStruct(), sizeof(WTSTransStruct));
-						}
-						else
-						{
+						StdUniqueLock lock(m_mtxCast);
+						m_condCast.wait(lock, [this]() {
+							if (!m_bTerminated && m_dataQue.empty() && m_beforeCastWait)
+								m_beforeCastWait();
+							return m_bTerminated || !m_dataQue.empty();
+						});
+						if (m_bTerminated && m_dataQue.empty())
 							break;
-						}
-
-						//广播
-						boost::system::error_code ec;
-						for (auto it = m_listRawRecver.begin(); it != m_listRawRecver.end(); it++)
-						{
-							const UDPReceiverPtr& receiver = (*it);
-							m_sktBroadcast->send_to(boost::asio::buffer(buf_raw), receiver->_ep, 0, ec);
-							if (ec)
-							{
-								WTSLogger::error("Error occured while sending to ({}:{}): {}({})", 
-									receiver->_ep.address().to_string(), receiver->_ep.port(), ec.value(), ec.message());
-							}
-						}
-
-						//组播
-						for (auto it = m_listRawGroup.begin(); it != m_listRawGroup.end(); it++)
-						{
-							const MulticastPair& item = *it;
-							it->first->send_to(boost::asio::buffer(buf_raw), item.second->_ep, 0, ec);
-							if (ec)
-							{
-								WTSLogger::error("Error occured while sending to ({}:{}): {}({})",
-									item.second->_ep.address().to_string(), item.second->_ep.port(), ec.value(), ec.message());
-							}
-						}
+						tmpQue.swap(m_dataQue);
 					}
+				
+					while(!tmpQue.empty())
+					{
+						const CastData& castData = tmpQue.front();
 
-					tmpQue.pop();
-				} 
-			}
-		}));
+						if (castData._data == NULL)
+							break;
+
+						//直接广播
+						if (!m_listRawGroup.empty() || !m_listRawRecver.empty())
+						{
+							std::string buf_raw;
+							if (castData._datatype == UDP_MSG_PUSHTICK)
+							{
+								buf_raw.resize(sizeof(UDPTickPacket));
+								UDPTickPacket* pack = (UDPTickPacket*)buf_raw.data();
+								pack->_type = castData._datatype;
+								WTSTickData* curObj = (WTSTickData*)castData._data;
+								memcpy(&pack->_data, &curObj->getTickStruct(), sizeof(WTSTickStruct));
+							}
+							else if (castData._datatype == UDP_MSG_PUSHORDDTL)
+							{
+								buf_raw.resize(sizeof(UDPOrdDtlPacket));
+								UDPOrdDtlPacket* pack = (UDPOrdDtlPacket*)buf_raw.data();
+								pack->_type = castData._datatype;
+								WTSOrdDtlData* curObj = (WTSOrdDtlData*)castData._data;
+								memcpy(&pack->_data, &curObj->getOrdDtlStruct(), sizeof(WTSOrdDtlStruct));
+							}
+							else if (castData._datatype == UDP_MSG_PUSHORDQUE)
+							{
+								buf_raw.resize(sizeof(UDPOrdQuePacket));
+								UDPOrdQuePacket* pack = (UDPOrdQuePacket*)buf_raw.data();
+								pack->_type = castData._datatype;
+								WTSOrdQueData* curObj = (WTSOrdQueData*)castData._data;
+								memcpy(&pack->_data, &curObj->getOrdQueStruct(), sizeof(WTSOrdQueStruct));
+							}
+							else if (castData._datatype == UDP_MSG_PUSHTRANS)
+							{
+								buf_raw.resize(sizeof(UDPTransPacket));
+								UDPTransPacket* pack = (UDPTransPacket*)buf_raw.data();
+								pack->_type = castData._datatype;
+								WTSTransData* curObj = (WTSTransData*)castData._data;
+								memcpy(&pack->_data, &curObj->getTransStruct(), sizeof(WTSTransStruct));
+							}
+							else
+							{
+								break;
+							}
+
+							//广播
+							boost::system::error_code ec;
+							for (auto it = m_listRawRecver.begin(); it != m_listRawRecver.end(); it++)
+							{
+								const UDPReceiverPtr& receiver = (*it);
+								m_sktBroadcast->send_to(boost::asio::buffer(buf_raw), receiver->_ep, 0, ec);
+								if (ec)
+								{
+									WTSLogger::error("Error occured while sending to ({}:{}): {}({})",
+										receiver->_ep.address().to_string(), receiver->_ep.port(), ec.value(), ec.message());
+								}
+							}
+
+							//组播
+							for (auto it = m_listRawGroup.begin(); it != m_listRawGroup.end(); it++)
+							{
+								const MulticastPair& item = *it;
+								it->first->send_to(boost::asio::buffer(buf_raw), item.second->_ep, 0, ec);
+								if (ec)
+								{
+									WTSLogger::error("Error occured while sending to ({}:{}): {}({})",
+										item.second->_ep.address().to_string(), item.second->_ep.port(), ec.value(), ec.message());
+								}
+							}
+						}
+
+						tmpQue.pop();
+					}
+				}
+			}));
+		}
 	}
-	else
-	{
-		m_condCast.notify_all();
-	}
+	m_condCast.notify_one();
 }
 
 void UDPCaster::handle_send_broad(const EndPoint& ep, const boost::system::error_code& error, std::size_t bytes_transferred)

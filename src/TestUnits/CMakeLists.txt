@@ -14,7 +14,8 @@ file(GLOB SRCS *.cpp ./gtest/*.cc)
 SET(LIBS
     WTSTools
 	WTSUtils
-    WtShareHelper)
+	WtShareHelper
+	WtDtCore)
 IF (MSVC)
 ELSE(GNUCC)
     LIST(APPEND LIBS pthread stdc++fs)
