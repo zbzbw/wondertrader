@@ -140,6 +140,12 @@ void UDPCaster::stop()
 	m_condCast.notify_all();
 	if (m_thrdCast)
 		m_thrdCast->join();
+
+	m_sktSubscribe.reset();
+	m_sktBroadcast.reset();
+	m_listFlatGroup.clear();
+	m_listJsonGroup.clear();
+	m_listRawGroup.clear();
 }
 
 void UDPCaster::do_receive()
