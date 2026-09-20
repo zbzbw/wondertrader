@@ -168,6 +168,18 @@ void DataManager::transHisData(const char* sid)
 		_writer->transHisData(sid);
 }
 
+void DataManager::beginSessionClose(const char* sid)
+{
+	if (_writer)
+		_writer->beginSessionClose(sid);
+}
+
+void DataManager::beginSessionOpen(const char* sid)
+{
+	if (_writer)
+		_writer->beginSessionOpen(sid);
+}
+
 //////////////////////////////////////////////////////////////////////////
 #pragma region "IDataWriterSink"
 IBaseDataMgr* DataManager::getBDMgr()

@@ -481,6 +481,7 @@ bool WtDtRunner::stopAndFlush(WtDtStopResult& result)
 	{
 		WTSLogger::error("DataKit stop/flush failed with an unknown exception");
 	}
+	_udp_caster.stop();
 	result.writer_drained = writer_result.writer_drained ? 1 : 0;
 	result.checkpoint_persisted = writer_result.checkpoint_persisted ? 1 : 0;
 	result.received_offset = writer_result.received_offset;

@@ -13,6 +13,7 @@
 #include "../Share/StdUtils.hpp"
 
 #include <boost/asio.hpp>
+#include <functional>
 #include <queue>
 
 NS_WTP_BEGIN
@@ -23,9 +24,12 @@ USING_NS_WTP;
 
 class WTSBaseDataMgr;
 class DataManager;
+class UDPCasterTestPeer;
 
 class UDPCaster : public IDataCaster
 {
+friend class UDPCasterTestPeer;
+
 public:
 	UDPCaster();
 	~UDPCaster();
@@ -100,6 +104,7 @@ private:
 	StdCondVariable	m_condCast;
 	StdUniqueMutex	m_mtxCast;
 	bool			m_bTerminated;
+	std::function<void()>	m_beforeCastWait;
 
 	WTSBaseDataMgr*	m_bdMgr;
 	DataManager*	m_dtMgr;
