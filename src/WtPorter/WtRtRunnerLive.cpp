@@ -71,7 +71,7 @@ public:
     WtControlledRuntime(TraderAdapterPtr trader, WtCtaEngine& engine, WtDtMgr& data, const Value& request)
         : trader(std::move(trader)), engine(engine), data(data), owner(std::this_thread::get_id()) {
         mode = text(request, "mode");
-        if (mode != "paper" && mode != "broker_sim") throw std::invalid_argument("Controlled runtime supports paper or broker_sim only");
+        if (mode != "paper" && mode != "broker_sim" && mode != "live") throw std::invalid_argument("Controlled runtime supports paper, broker_sim or live only");
         code = text(request, "instrument_id"); contract = engine.get_contract_info(code.c_str());
         if (!contract) throw std::invalid_argument("Controlled runtime requires one known physical contract");
         if ((mode == "paper") != this->trader->supportsPaperControl()) throw std::invalid_argument("Trader does not match the controlled account mode");
@@ -141,7 +141,7 @@ public:
             } else if (operation == "step") {
                 if (!started || !connected) throw std::logic_error("Controlled runtime is not started and connected");
                 const bool observe = d.HasMember("observe_only") && d["observe_only"].IsBool() && d["observe_only"].GetBool();
-                if (observe && (mode != "broker_sim" || !stopping))
+                if (observe && (mode == "paper" || !stopping))
                     throw std::logic_error("Input reconstruction requires a blocked external account");
                 // Reconstruct only local CTA/cache state after a broker query.
                 // The final trader gate and coordinator submit gate stay blocked.
