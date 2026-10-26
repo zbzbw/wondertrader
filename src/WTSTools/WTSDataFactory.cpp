@@ -233,7 +233,9 @@ WTSBarStruct* WTSDataFactory::updateMin1Data(WTSSessionInfo* sInfo, WTSKlineData
 	 */
 	if (bAlignSec)
 	{
-		auto it = std::lower_bound(secMins.begin(), secMins.end(), uMinute);
+		// End ticks were shifted back above; an opening tick at a cumulative
+		// section boundary must select the following section.
+		auto it = std::upper_bound(secMins.begin(), secMins.end(), uMinute);
 		auto secIdx = it - secMins.begin();
 		if (secIdx == 0)
 		{
@@ -444,7 +446,10 @@ WTSBarStruct* WTSDataFactory::updateMin5Data(WTSSessionInfo* sInfo, WTSKlineData
 	 */
 	if (bAlignSec)
 	{
-		auto it = std::lower_bound(secMins.begin(), secMins.end(), uMinute);
+		// Section-end ticks were moved back one minute above. At the same
+		// cumulative minute, a later section's opening tick belongs to that
+		// new section, not to the previous section's already completed bar.
+		auto it = std::upper_bound(secMins.begin(), secMins.end(), uMinute);
 		auto secIdx = it - secMins.begin();
 		if (secIdx == 0)
 		{
