@@ -4,10 +4,18 @@
 latest quotes and UDP broadcaster continue. Actions are 0 (status), 1 (start), and
 2 (stop). This entry is separate from maintenance `request_stop` / `stop_and_flush`.
 
+Only WtDataStorage supports these controls. DataKit initialization returns false
+for unsupported writers, including WtDataStorageAD, and logs the required module;
+starting a DataKit whose initialization failed does not start parser reception.
+The companion Python wrapper raises on initialization failure.
+
 DataManager slices snapshots and keeps one latest quote per known contract in
 memory before broadcasting. WtDataStorage only persists already normalized ticks.
 A storage error or stopped writer cannot prevent later valid ticks from reaching
 the broadcaster or latest-quote queries.
+Shared reception logs its valid Tick count at most once per second while ticks
+arrive, including while recording is stopped or failed. Health uses this activity
+separately from persistence status and historical file modification times.
 
 Stopping detaches the writer, drains accepted work using `stopAndDrain`, flushes
 its files, and returns the existing persistence evidence. A repeated stop returns

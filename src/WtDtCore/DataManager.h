@@ -111,6 +111,7 @@ private:
 	std::string _base_path;
 	uint64_t _segment;
 	std::atomic<uint64_t> _received;
+	std::atomic<uint64_t> _last_receive_log_second;
 	bool _recording;
 	bool _recording_failed;
 	DataWriterStopResult _last_drain;

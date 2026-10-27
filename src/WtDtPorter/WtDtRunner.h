@@ -36,7 +36,7 @@ public:
 	~WtDtRunner();
 
 public:
-	void	initialize(const char* cfgFile, const char* logCfg, const char* modDir = "", bool bCfgFile = true, bool bLogCfgFile = true);
+	bool	initialize(const char* cfgFile, const char* logCfg, const char* modDir = "", bool bCfgFile = true, bool bLogCfgFile = true);
 	void	start(bool bAsync = false, bool bAlldayMode = false);
 	bool recordingControl(uint32_t action, WtRecordingResult& result);
 	bool	requestStop();
@@ -79,7 +79,7 @@ public:
 	bool dumpHisTrans(const char* id, const char* stdCode, uint32_t uDate, WTSTransStruct* items, uint32_t count);
 
 private:
-	void initDataMgr(WTSVariant* config, bool bAlldayMode = false);
+	bool initDataMgr(WTSVariant* config, bool bAlldayMode = false);
 	void initParsers(WTSVariant* cfg);
 
 private:
@@ -108,6 +108,7 @@ private:
 	typedef std::map<std::string, ExpDumperPtr>  ExpDumpers;
 	ExpDumpers		_dumpers;
 
+	bool _initialized;
 	std::atomic<bool> _to_exit;
 	std::atomic<bool> _stop_requested;
 	std::mutex _stop_mtx;

@@ -16,7 +16,7 @@ extern "C"
 {
 #endif
 
-	EXPORT_FLAG void		initialize(WtString cfgFile, WtString logCfg, bool bCfgFile, bool bLogCfgFile);
+	EXPORT_FLAG bool		initialize(WtString cfgFile, WtString logCfg, bool bCfgFile, bool bLogCfgFile);
 	EXPORT_FLAG void		start(bool bAsync = false);
 	// request_stop only closes the reception gate. stop_and_flush must be
 	// called after start returns to obtain durable shutdown evidence.

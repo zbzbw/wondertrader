@@ -51,12 +51,12 @@ WtDtRunner& getRunner()
 	return runner;
 }
 
-void initialize(WtString cfgFile, WtString logCfg, bool bCfgFile, bool bLogCfgFile)
+bool initialize(WtString cfgFile, WtString logCfg, bool bCfgFile, bool bLogCfgFile)
 {
 #ifdef _MSC_VER
 	CMiniDumper::Enable(getModuleName(), true, WtHelper::get_cwd());
 #endif
-	getRunner().initialize(cfgFile, logCfg, getBinDir(), bCfgFile, bLogCfgFile);
+	return getRunner().initialize(cfgFile, logCfg, getBinDir(), bCfgFile, bLogCfgFile);
 }
 
 void start(bool bAsync/* = false*/)

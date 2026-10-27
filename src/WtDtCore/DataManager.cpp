@@ -21,13 +21,14 @@
 #include "../Includes/WTSContractInfo.hpp"
 #include "../Includes/WTSSessionInfo.hpp"
 #include <boost/filesystem.hpp>
+#include <ctime>
 
 #include "../WTSTools/WTSBaseDataMgr.h"
 #include "../WTSTools/WTSLogger.h"
 
 
 DataManager::DataManager()
-	: _writer_params(NULL), _creator(NULL), _segment(0), _received(0)
+	: _writer_params(NULL), _creator(NULL), _segment(0), _received(0), _last_receive_log_second(0)
 	, _recording(false), _recording_failed(false), _accepted_total(0), _persisted_total(0)
 	, _writer(NULL)
 	, _writer_ready(false)
@@ -107,6 +108,16 @@ bool DataManager::init(WTSVariant* params, WTSBaseDataMgr* bdMgr, StateMonitor* 
 
 	if (_writer == NULL)
 		return false;
+	uint64_t accepted, persisted;
+	bool failed;
+	if (!_writer->recordingOffsets(accepted, persisted, failed))
+	{
+		WTSLogger::error("Data writer {} does not support independent recording controls; use WtDataStorage", module);
+		_recording_failed = true;
+		_remover(_writer);
+		_writer = NULL;
+		return false;
+	}
 	_writer_ready = _writer->init(params, this);
 	_recording = _writer_ready;
 	_recording_failed = !_writer_ready;
@@ -224,8 +235,12 @@ void DataManager::recordingStatus(bool& recording, bool& failed, uint64_t& recei
 bool DataManager::writeTick(WTSTickData* curTick, uint32_t procFlag)
 {
 	if (curTick == NULL || !updateLatest(curTick, procFlag)) return false;
-	_received.fetch_add(1);
+	uint64_t received = _received.fetch_add(1) + 1;
 	broadcastTick(curTick);
+	uint64_t now = static_cast<uint64_t>(std::time(NULL));
+	uint64_t previous = _last_receive_log_second.load();
+	if (now != previous && _last_receive_log_second.compare_exchange_strong(previous, now))
+		WTSLogger::info("{} shared market data ticks received", received);
 	std::lock_guard<std::mutex> lock(_writer_mtx);
 	if (!_recording || _recording_failed || !_writer) return true;
 	uint64_t accepted, persisted;
