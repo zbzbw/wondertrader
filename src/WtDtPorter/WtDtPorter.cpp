@@ -74,6 +74,11 @@ bool recording_instruments(WtString instruments)
 	return getRunner().setRecordingInstruments(instruments);
 }
 
+bool recording_limit(WtUInt64 accepted_limit)
+{
+	return getRunner().setRecordingLimit(accepted_limit);
+}
+
 bool request_stop()
 {
 	return getRunner().requestStop();

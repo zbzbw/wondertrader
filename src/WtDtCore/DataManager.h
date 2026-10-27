@@ -56,9 +56,10 @@ public:
 	bool stopAndFlush(DataWriterStopResult& result);
 	bool startRecording();
 	bool setRecordingInstruments(const std::set<std::string>& instruments);
+	bool setRecordingLimit(uint64_t accepted_limit);
 	bool stopRecording(DataWriterStopResult& result);
 	void recordingStatus(bool& recording, bool& failed, uint64_t& received,
-		uint64_t& accepted, uint64_t& persisted, uint64_t& segment);
+		uint64_t& accepted, uint64_t& persisted, uint64_t& segment, bool& capacity_exhausted);
 
 
 	bool writeTick(WTSTickData* curTick, uint32_t procFlag);
@@ -117,6 +118,9 @@ private:
 	bool _recording;
 	bool _recording_failed;
 	bool _recording_filter_set;
+	bool _recording_limit_enabled;
+	bool _recording_capacity_exhausted;
+	uint64_t _recording_limit;
 	std::set<std::string> _recording_instruments;
 	DataWriterStopResult _last_drain;
 	uint64_t _accepted_total;

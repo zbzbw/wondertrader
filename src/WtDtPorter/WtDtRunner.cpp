@@ -484,6 +484,12 @@ bool WtDtRunner::setRecordingInstruments(const char* instruments)
 	return _data_mgr.setRecordingInstruments(selected);
 }
 
+bool WtDtRunner::setRecordingLimit(uint64_t accepted_limit)
+{
+	std::lock_guard<std::mutex> lock(_stop_mtx);
+	return _initialized && !_stop_requested.load() && _data_mgr.setRecordingLimit(accepted_limit);
+}
+
 bool WtDtRunner::recordingControl(uint32_t action, WtRecordingResult& result)
 {
 	std::lock_guard<std::mutex> lock(_stop_mtx);
@@ -499,11 +505,12 @@ bool WtDtRunner::recordingControl(uint32_t action, WtRecordingResult& result)
 	if (action == 1) success = _data_mgr.startRecording();
 	else if (action == 2) success = _data_mgr.stopRecording(drained);
 	else if (action != 0) return false;
-	bool recording, failed;
+	bool recording, failed, capacity_exhausted;
 	_data_mgr.recordingStatus(recording, failed, result.received_offset,
-		result.accepted_offset, result.persisted_offset, result.segment);
+		result.accepted_offset, result.persisted_offset, result.segment, capacity_exhausted);
 	result.recording = recording;
 	result.failed = failed;
+	result.capacity_exhausted = capacity_exhausted;
 	result.writer_drained = action == 2 && drained.writer_drained;
 	result.checkpoint_persisted = action == 2 && drained.checkpoint_persisted;
 	if (action == 0 && !recording && _have_recording_stop)

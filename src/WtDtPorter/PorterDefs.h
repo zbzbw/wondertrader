@@ -38,7 +38,8 @@ typedef struct _WtRecordingResult
 	uint8_t failed;
 	uint8_t writer_drained;
 	uint8_t checkpoint_persisted;
-	uint8_t reserved[4];
+	uint8_t capacity_exhausted;
+	uint8_t reserved[3];
 	uint64_t received_offset;
 	uint64_t accepted_offset;
 	uint64_t persisted_offset;

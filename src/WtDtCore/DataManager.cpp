@@ -31,6 +31,7 @@ DataManager::DataManager()
 	: _writer_params(NULL), _creator(NULL), _segment(0), _received(0), _last_receive_log_second(0)
 	, _recording(false), _recording_failed(false), _accepted_total(0), _persisted_total(0)
 	, _recording_filter_set(false)
+	, _recording_limit_enabled(false), _recording_capacity_exhausted(false), _recording_limit(0)
 	, _writer(NULL)
 	, _writer_ready(false)
 	, _bd_mgr(NULL)
@@ -229,8 +230,19 @@ bool DataManager::startRecording()
 	return _writer_ready;
 }
 
+bool DataManager::setRecordingLimit(uint64_t accepted_limit)
+{
+	std::lock_guard<std::mutex> lock(_writer_mtx);
+	if (_recording_failed) return false;
+	// Exhaustion is sticky until a completed stop and an explicit start.
+	if (!_recording) _recording_capacity_exhausted = false;
+	_recording_limit_enabled = true;
+	_recording_limit = accepted_limit;
+	return true;
+}
+
 void DataManager::recordingStatus(bool& recording, bool& failed, uint64_t& received,
-	uint64_t& accepted, uint64_t& persisted, uint64_t& segment)
+	uint64_t& accepted, uint64_t& persisted, uint64_t& segment, bool& capacity_exhausted)
 {
 	std::lock_guard<std::mutex> lock(_writer_mtx);
 	recording = _recording;
@@ -241,6 +253,7 @@ void DataManager::recordingStatus(bool& recording, bool& failed, uint64_t& recei
 	accepted += _accepted_total;
 	persisted += _persisted_total;
 	segment = _segment;
+	capacity_exhausted = _recording_capacity_exhausted;
 }
 
 bool DataManager::writeTick(WTSTickData* curTick, uint32_t procFlag)
@@ -260,6 +273,12 @@ bool DataManager::writeTick(WTSTickData* curTick, uint32_t procFlag)
 	uint64_t accepted, persisted;
 	_writer->recordingOffsets(accepted, persisted, _recording_failed);
 	if (_recording_failed) return true;
+	if (_recording_limit_enabled && (_recording_capacity_exhausted
+		|| accepted + _accepted_total >= _recording_limit))
+	{
+		_recording_capacity_exhausted = true;
+		return true;
+	}
 	return _writer->writeTick(curTick, 0);
 }
 

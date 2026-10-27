@@ -22,6 +22,7 @@ extern "C"
 	// called after start returns to obtain durable shutdown evidence.
 	EXPORT_FLAG bool recording_control(WtUInt32 action, WtRecordingResult* result);
 	EXPORT_FLAG bool recording_instruments(WtString instruments);
+	EXPORT_FLAG bool recording_limit(WtUInt64 accepted_limit);
 	EXPORT_FLAG bool		request_stop();
 	EXPORT_FLAG bool		stop_and_flush(WtDtStopResult* result);
 
