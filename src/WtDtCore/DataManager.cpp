@@ -30,6 +30,7 @@
 DataManager::DataManager()
 	: _writer_params(NULL), _creator(NULL), _segment(0), _received(0), _last_receive_log_second(0)
 	, _recording(false), _recording_failed(false), _accepted_total(0), _persisted_total(0)
+	, _recording_filter_set(false)
 	, _writer(NULL)
 	, _writer_ready(false)
 	, _bd_mgr(NULL)
@@ -60,7 +61,8 @@ bool DataManager::init(WTSVariant* params, WTSBaseDataMgr* bdMgr, StateMonitor* 
 	_writer_params = params;
 	params->retain();
 	_base_path = StrUtil::standardisePath(params->getCString("path"));
-	if (boost::filesystem::exists(_base_path + "segments"))
+	if (boost::filesystem::exists(_base_path + "segments")
+		|| boost::filesystem::is_regular_file(_base_path + "recording/closed.json"))
 	{
 		std::string next_path;
 		do {
@@ -197,6 +199,15 @@ bool DataManager::stopRecording(DataWriterStopResult& result)
 	return success;
 }
 
+bool DataManager::setRecordingInstruments(const std::set<std::string>& instruments)
+{
+	std::lock_guard<std::mutex> lock(_writer_mtx);
+	if (_recording || _writer != NULL || _recording_failed) return false;
+	_recording_instruments = instruments;
+	_recording_filter_set = true;
+	return true;
+}
+
 bool DataManager::startRecording()
 {
 	std::lock_guard<std::mutex> lock(_writer_mtx);
@@ -243,6 +254,9 @@ bool DataManager::writeTick(WTSTickData* curTick, uint32_t procFlag)
 		WTSLogger::info("{} shared market data ticks received", received);
 	std::lock_guard<std::mutex> lock(_writer_mtx);
 	if (!_recording || _recording_failed || !_writer) return true;
+	if (_recording_filter_set
+		&& _recording_instruments.count(curTick->getContractInfo()->getFullCode()) == 0)
+		return true;
 	uint64_t accepted, persisted;
 	_writer->recordingOffsets(accepted, persisted, _recording_failed);
 	if (_recording_failed) return true;

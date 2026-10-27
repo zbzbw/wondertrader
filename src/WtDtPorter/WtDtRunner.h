@@ -39,6 +39,7 @@ public:
 	bool	initialize(const char* cfgFile, const char* logCfg, const char* modDir = "", bool bCfgFile = true, bool bLogCfgFile = true);
 	void	start(bool bAsync = false, bool bAlldayMode = false);
 	bool recordingControl(uint32_t action, WtRecordingResult& result);
+	bool setRecordingInstruments(const char* instruments);
 	bool	requestStop();
 	bool	stopAndFlush(WtDtStopResult& result);
 

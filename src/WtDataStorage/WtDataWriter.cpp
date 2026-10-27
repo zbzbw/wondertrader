@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <iomanip>
+#include <chrono>
 
 #ifdef _WIN32
 #include <fcntl.h>
@@ -36,6 +37,12 @@ namespace fs = boost::filesystem;
 
 namespace
 {
+uint64_t reception_time_ns()
+{
+	return std::chrono::duration_cast<std::chrono::nanoseconds>(
+		std::chrono::system_clock::now().time_since_epoch()).count();
+}
+
 bool flush_path(const std::string& path)
 {
 #ifdef _WIN32
@@ -54,6 +61,34 @@ bool flush_path(const std::string& path)
 	close(fd);
 	return success;
 #endif
+}
+
+bool write_tick_dsb(const std::string& target, const WTSTickStruct* ticks, uint32_t count)
+{
+	try
+	{
+		if (StdFile::exists(target.c_str())) return false;
+		fs::create_directories(fs::path(target).parent_path());
+		std::string compressed = WTSCmpHelper::compress_data(ticks, sizeof(WTSTickStruct) * count);
+		BlockHeaderV2 header;
+		strcpy(header._blk_flag, BLK_FLAG);
+		header._type = BT_HIS_Ticks;
+		header._version = BLOCK_VERSION_CMP_V2;
+		header._size = compressed.size();
+		std::string temporary = target + ".tmp";
+		BoostFile file;
+		if (!file.create_new_file(temporary.c_str())) return false;
+		bool wrote = file.write_file(&header, sizeof(header))
+			&& file.write_file(compressed.data(), compressed.size());
+		file.close_file();
+		if (!wrote || !flush_path(temporary)) return false;
+		fs::rename(temporary, target);
+		return true;
+	}
+	catch (...)
+	{
+		return false;
+	}
 }
 
 std::string file_fingerprint(const std::string& path)
@@ -323,10 +358,11 @@ bool WtDataWriter::stopAndDrain(DataWriterStopResult& result)
 
 	bool files_persisted = result.writer_drained && flushFiles();
 	bool recovery_persisted = files_persisted && persistPendingRecordingUnits();
+	bool raw_closed = recovery_persisted && !_processing_failed.load() && closeRawRecording();
 	result.persisted_offset = recovery_persisted
 		? _persisted_offset.load()
 		: 0;
-	result.checkpoint_persisted = recovery_persisted && !_processing_failed.load();
+	result.checkpoint_persisted = recovery_persisted && raw_closed && !_processing_failed.load();
 	bool success = result.writer_drained && result.checkpoint_persisted
 		&& result.received_offset == result.persisted_offset;
 	releaseFiles();
@@ -335,6 +371,60 @@ bool WtDataWriter::stopAndDrain(DataWriterStopResult& result)
 		"Controlled stop completed: received offset {}, persisted offset {}",
 		result.received_offset, result.persisted_offset);
 	return success;
+}
+
+bool WtDataWriter::closeRawRecording()
+{
+	if (_unit_drain.units().empty()) return true;
+	const char* run_id = std::getenv("BWT_DATAKIT_RUN_ID");
+	if (run_id == NULL || strlen(run_id) == 0) return false;
+	rapidjson::StringBuffer buffer;
+	rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+	writer.StartObject();
+	writer.Key("status"); writer.String("closed");
+	writer.Key("source_session"); writer.String(run_id);
+	writer.Key("closed_at_ns"); writer.Uint64(reception_time_ns());
+	writer.Key("complete_day"); writer.Bool(false);
+	writer.Key("items"); writer.StartArray();
+	for (const RecordingUnitProgress& unit : _unit_drain.units())
+	{
+		auto split = unit.fullcode.find('.');
+		if (split == std::string::npos || unit.failed || unit.accepted != unit.persisted) return false;
+		DmbBoundary boundary;
+		if (!inspectTickDmb(unit.fullcode, boundary)) return false;
+		// A daily close already emitted this unit. Its complete-day facts remain
+		// authoritative and its empty DMB must not produce a duplicate raw file.
+		if (boundary.row_count == 0) continue;
+		if (boundary.trading_date != unit.trading_date || boundary.row_count != unit.persisted) return false;
+		std::string exchg = unit.fullcode.substr(0, split);
+		std::string code = unit.fullcode.substr(split + 1);
+		WTSContractInfo* contract = _bd_mgr->getContract(code.c_str(), exchg.c_str());
+		TickBlockPair* block = getTickBlock(contract, unit.trading_date, false);
+		if (block == NULL || block->_block == NULL) return false;
+		SpinLock lock(block->_mutex);
+		std::string relative = fmtutil::format("raw/ticks/{}/{}/{}.dsb", unit.trading_date, exchg, code);
+		if (!write_tick_dsb(_base_dir + relative, block->_block->_ticks, block->_block->_size))
+		{
+			pipe_writer_log(_sink, LL_ERROR, "Raw recording close failed for {}", unit.fullcode);
+			return false;
+		}
+		writer.StartObject();
+		writer.Key("instrument"); writer.String(unit.fullcode.c_str());
+		writer.Key("trading_date"); writer.Uint(unit.trading_date);
+		writer.Key("dsb_path"); writer.String(relative.c_str());
+		writer.Key("dmb_path"); writer.String(boundary.relative_path.c_str());
+		writer.Key("rows"); writer.Uint64(boundary.row_count);
+		writer.Key("bytes"); writer.Uint64(BoostFile::get_file_size((_base_dir + relative).c_str()));
+		writer.Key("first_received_ns"); writer.Uint64(unit.first_received_ns);
+		writer.Key("last_received_ns"); writer.Uint64(unit.last_received_ns);
+		writer.Key("accepted_offset"); writer.Uint64(unit.accepted);
+		writer.Key("persisted_offset"); writer.Uint64(unit.persisted);
+		writer.EndObject();
+	}
+	writer.EndArray();
+	writer.EndObject();
+	return write_atomic_document(_base_dir + "recording/closed.json",
+		std::string(buffer.GetString(), buffer.GetSize()));
 }
 
 bool WtDataWriter::flushFiles()
@@ -1083,7 +1173,7 @@ bool WtDataWriter::beginSyncTask(TaskInfo& task)
 	if (!_accepting)
 		return false;
 	if (task._type == 0 && !_unit_drain.accept(
-		task._session_id, task._fullcode, task._trading_date, task._unit_key))
+		task._session_id, task._fullcode, task._trading_date, task._unit_key, reception_time_ns()))
 		return false;
 	_received_offset.fetch_add(1);
 	return true;
@@ -1117,7 +1207,7 @@ bool WtDataWriter::pushTask(const TaskInfo& task)
 		accepted._session_id,
 		accepted._fullcode,
 		accepted._trading_date,
-		accepted._unit_key))
+		accepted._unit_key, reception_time_ns()))
 		return false;
 	_tasks.emplace(accepted);
 	_received_offset.fetch_add(1);
@@ -2762,6 +2852,8 @@ bool WtDataWriter::persistRecordingUnitFact(
 	writer.Key("completed_offset"); writer.Uint64(unit.completed);
 	writer.Key("persisted_offset"); writer.Uint64(unit.persisted);
 	writer.Key("writer_drained"); writer.Bool(true);
+	writer.Key("first_received_ns"); writer.Uint64(unit.first_received_ns);
+	writer.Key("last_received_ns"); writer.Uint64(unit.last_received_ns);
 	writer.Key("checkpoint_persisted"); writer.Bool(true);
 	writer.Key("dmb_path"); writer.String(close_result.dmb_path.c_str());
 	writer.Key("dsb_path"); writer.String(close_result.dsb_path.c_str());
@@ -3146,22 +3238,10 @@ void WtDataWriter::proc_loop()
 								bNew = true;
 
 							pipe_writer_log(_sink, LL_INFO, "Openning data storage file: {}", filename.c_str());
-							BoostFile f;
-							if (stream_ok && dmb_ok && f.create_new_file(filename.c_str()))
+							if (stream_ok && dmb_ok)
 							{
-								//先压缩数据
-								std::string cmp_data = WTSCmpHelper::compress_data(tBlkPair->_block->_ticks, sizeof(WTSTickStruct)*tBlkPair->_block->_size);
-
-								BlockHeaderV2 header;
-								strcpy(header._blk_flag, BLK_FLAG);
-								header._type = BT_HIS_Ticks;
-								header._version = BLOCK_VERSION_CMP_V2;
-								header._size = cmp_data.size();
-								bool wrote = f.write_file(&header, sizeof(header));
-
-								wrote = wrote && f.write_file(cmp_data.c_str(), cmp_data.size());
-								f.close_file();
-								wrote = wrote && flush_path(filename);
+								bool wrote = write_tick_dsb(filename,
+									tBlkPair->_block->_ticks, tBlkPair->_block->_size);
 								if (wrote)
 								{
 									uint32_t rows = tBlkPair->_block->_size;

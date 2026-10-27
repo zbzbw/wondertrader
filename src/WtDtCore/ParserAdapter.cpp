@@ -68,6 +68,7 @@ bool ParserAdapter::initExt(const char* id, IParserApi* api)
 
 			ayContract->release();
 
+			_subscriptions = contractSet;
 			_parser_api->subscribe(contractSet);
 			contractSet.clear();
 		}
@@ -188,6 +189,7 @@ bool ParserAdapter::init(const char* id, WTSVariant* cfg)
 				ayContract->release();
 			}
 
+			_subscriptions = contractSet;
 			_parser_api->subscribe(contractSet);
 			contractSet.clear();
 		}

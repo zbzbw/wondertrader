@@ -452,6 +452,38 @@ bool WtDtRunner::dumpHisTrans(const char* id, const char* stdCode, uint32_t uDat
 	return _dumper_for_trans(id, stdCode, uDate, items, count);
 }
 
+bool WtDtRunner::setRecordingInstruments(const char* instruments)
+{
+	std::lock_guard<std::mutex> lock(_stop_mtx);
+	if (!_initialized || _stop_requested.load() || instruments == NULL) return false;
+	std::set<std::string> available;
+	for (const auto& parser : _parsers._adapters)
+	{
+		for (const std::string& code : parser.second->subscriptions())
+		{
+			auto pos = code.find('.');
+			if (pos == std::string::npos) continue;
+			WTSContractInfo* contract = _bd_mgr.getContract(
+				code.substr(pos + 1).c_str(), code.substr(0, pos).c_str());
+			if (contract) available.insert(contract->getFullCode());
+		}
+	}
+	std::set<std::string> selected;
+	if (strlen(instruments) != 0)
+	{
+		for (const std::string& code : StrUtil::split(instruments, ","))
+		{
+			if (available.count(code) == 0)
+			{
+				WTSLogger::error("Recording instrument {} requires market-data maintenance", code);
+				return false;
+			}
+			selected.insert(code);
+		}
+	}
+	return _data_mgr.setRecordingInstruments(selected);
+}
+
 bool WtDtRunner::recordingControl(uint32_t action, WtRecordingResult& result)
 {
 	std::lock_guard<std::mutex> lock(_stop_mtx);
