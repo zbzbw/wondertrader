@@ -40,6 +40,7 @@ public:
 	void	start(bool bAsync = false, bool bAlldayMode = false);
 	bool recordingControl(uint32_t action, WtRecordingResult& result);
 	bool setRecordingInstruments(const char* instruments);
+	bool setRecordingLimit(uint64_t accepted_limit);
 	bool	requestStop();
 	bool	stopAndFlush(WtDtStopResult& result);
 
