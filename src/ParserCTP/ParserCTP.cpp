@@ -345,14 +345,9 @@ void ParserCTP::OnRtnDepthMarketData( CThostFtdcDepthMarketDataField *pDepthMark
 
 void ParserCTP::OnRspSubMarketData( CThostFtdcSpecificInstrumentField *pSpecificInstrument, CThostFtdcRspInfoField *pRspInfo, int nRequestID, bool bIsLast )
 {
-	if(!IsErrorRspInfo(pRspInfo))
-	{
-
-	}
-	else
-	{
-
-	}
+	const bool accepted = !IsErrorRspInfo(pRspInfo);
+	if (m_sink && (pSpecificInstrument || !accepted))
+		m_sink->handleSubscription(pSpecificInstrument ? pSpecificInstrument->InstrumentID : "", accepted);
 }
 
 void ParserCTP::OnHeartBeatWarning( int nTimeLapse )

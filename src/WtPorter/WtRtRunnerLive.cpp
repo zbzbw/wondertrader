@@ -1,4 +1,5 @@
 #include "WtRtRunner.h"
+#include "ControlledBars.h"
 #include "../Includes/WTSTradeDef.hpp"
 #include "../Includes/WTSContractInfo.hpp"
 #include "../Includes/WTSDataDef.hpp"
@@ -79,6 +80,7 @@ public:
         event_ms = integer(request, "event_ms"); received_at = text(request, "received_at");
         const auto initialDay = readUint32(request, "trading_day");
         if (!event_ms || received_at.empty()) throw std::invalid_argument("Controlled input origin is required");
+        if (request.HasMember("bar_inputs")) shared_bars.configure(request["bar_inputs"], engine, data);
         this->trader->configureLive(run, generation, contract->getFullCode(), [this](CommonExecuter action) {
             std::lock_guard<std::mutex> lock{this->callback_mutex}; this->callbacks.push_back(std::move(action));
         });
@@ -148,6 +150,12 @@ public:
                 const auto& refresh = field(d, "refresh");
                 if (!refresh.IsBool()) throw std::invalid_argument("Query refresh must be a boolean");
                 if (refresh.GetBool() && trader->queryLiveFacts() < 0) throw std::runtime_error("Native reconciliation query was rejected");
+                if (d.HasMember("bar_after_ns")) {
+                    auto after = text(d,"bar_after_ns");
+                    if (after.empty() || after.size()>20 || after.find_first_not_of("0123456789")!=std::string::npos)
+                        throw std::invalid_argument("Invalid shared bar calendar cursor");
+                    result = "\"" + std::to_string(shared_bars.nextClose(engine,readUint32(d,"trading_day"),std::stoull(after))) + "\"";
+                }
             } else if (operation == "ack") {
                 trader->acknowledgeLiveReports(integer(d, "sequence"));
             } else if (operation == "restore") {
@@ -232,8 +240,10 @@ private:
             throw std::invalid_argument("Controlled input cursor or time did not advance");
         const auto date = readUint32(d, "date"), time = readUint32(d, "time"), day = readUint32(d, "trading_day");
         auto kind = text(d, "kind"); auto received = text(d, "received_at");
-        if (kind != "tick" && kind != "bar" && kind != "bar_quote" && kind != "clock" && kind != "settle" && kind != "begin_day")
+        if (kind != "tick" && kind != "bar" && kind != "bar_quote" && kind != "clock" && kind != "settle" && kind != "begin_day" && kind != "market_bar")
             throw std::invalid_argument("Unsupported controlled input kind");
+        if (shared_bars.enabled() && (kind == "bar" || kind == "bar_quote"))
+            throw std::invalid_argument("Shared bars cannot mix with paper OHLC replay");
         if ((kind == "tick") != (tick != nullptr) || (kind == "bar" || kind == "bar_quote") != (bar != nullptr))
             throw std::invalid_argument("Controlled input payload does not match its kind");
         if (!bar_input.empty() && kind != "bar_quote" && kind != "bar")
@@ -253,8 +263,14 @@ private:
             throw std::invalid_argument("Completed bar must follow all four matching OHLC quotes");
         if (kind != "begin_day" && day != engine.getTradingDate()) throw std::invalid_argument("Controlled input trading day mismatch");
         if (tick && (std::string(tick->exchg) + "." + tick->code != contract->getFullCode()
-            || tick->action_date != date || tick->action_time != time || tick->trading_date != day))
+            || (!shared_bars.enabled() && (tick->action_date != date || tick->action_time != time)) || tick->trading_date != day))
             throw std::invalid_argument("Controlled quote identity or timestamp mismatch");
+        uint64_t incoming_source = source_ns;
+        if (tick && shared_bars.enabled()) {
+            incoming_source = LiveBarCalendar::timestamp(tick->action_date,tick->action_time);
+            if (incoming_source < source_ns || incoming_source / 1000000ULL > ms)
+                throw std::invalid_argument("Controlled quote source time is invalid");
+        }
         if (bar && bar->time + 199000000000ULL != uint64_t(date) * 10000 + time / 100000)
             throw std::invalid_argument("Controlled bar must close at its native timestamp");
         if (kind == "settle" && (mode != "paper" || text(field(d, "settlement"), "op") != "settle"))
@@ -262,7 +278,8 @@ private:
         if (kind == "begin_day" && mode == "paper" && text(field(d, "day_rules"), "op") != "begin_day")
             throw std::invalid_argument("Trading day input must contain a begin_day operation");
         trader->stampLiveInput(next, ms, received, day);
-        if (mode == "paper") paper = paperResult(trader->paperStep(next, ms, tick, kind == "bar_quote"));
+        if (mode == "paper" && kind != "market_bar")
+            paper = paperResult(trader->paperStep(++paper_sequence, ms, tick, kind == "bar_quote"));
         pump();
         if (kind == "settle") {
             if (mode != "paper") throw std::logic_error("External accounts settle only at their broker");
@@ -270,7 +287,31 @@ private:
         } else if (kind == "begin_day") {
             if (mode == "paper") paper = paperResult(trader->paperControl(json(field(d, "day_rules"))));
             engine.startControlled(date, time, day, ms, false);
+        } else if (shared_bars.enabled()) {
+            engine.set_controlled_time(ms);
+            if (kind == "market_bar") {
+                const auto previous = shared_bars.completedThrough();
+                shared_bars.apply(field(d,"market_bar"),data,[&](uint64_t at,uint32_t trading_day) {
+                    engine.set_date_time(LiveBarCalendar::date(at),LiveBarCalendar::hhmm(at),0,LiveBarCalendar::hhmm(at));
+                    engine.set_trading_date(trading_day);
+                });
+                engine.set_trading_date(day);
+                if (shared_bars.completedThrough() > previous) {
+                    const auto at = shared_bars.completedThrough();
+                    engine.stepControlled(LiveBarCalendar::date(at),LiveBarCalendar::hhmm(at)*100000,ms);
+                }
+            }
+            // The owner clock is independent of both callback labels and Tick source time.
+            engine.set_date_time(date,time/100000,time%100000,time/100000);
+            if (tick) {
+                auto release=[](WTSTickData* p){p->release();};
+                WTSTickStruct copy = *tick;
+                std::unique_ptr<WTSTickData,decltype(release)> quote(WTSTickData::create(copy),release);
+                quote->setCode(code.c_str()); quote->setContractInfo(contract);
+                engine.on_tick(code.c_str(),quote.get());
+            }
         } else {
+            if (kind == "market_bar") throw std::invalid_argument("Shared bar inputs are not configured");
             if (kind == "tick" || kind == "clock") aggregateTick(kind == "tick" ? tick : nullptr, date, time, ms);
             if (kind == "bar") data.controlledBar(code.c_str(), *bar, true);
             if (kind == "bar_quote") {
@@ -296,13 +337,17 @@ private:
                 paper = paperResult(trader->paperControl(expiry));
             }
         }
-        sequence = next; event_ms = ms; received_at = std::move(received);
+        sequence = next; event_ms = ms; source_ns = incoming_source; received_at = std::move(received);
     }
     std::string snapshot() const {
         if (!started) throw std::logic_error("Joint checkpoint requires initialized CTA state");
         rapidjson::StringBuffer buffer; Writer w(buffer);
         auto text = [&](const char* key, const std::string& value) { w.Key(key); w.String(value.c_str()); };
-        w.StartObject(); w.Key("version"); w.Uint(1); text("mode", mode); text("instrument_id", code);
+        w.StartObject(); w.Key("version"); w.Uint(2); text("mode", mode); text("instrument_id", code);
+        w.Key("paper_sequence"); w.Uint64(paper_sequence); text("source_ns",std::to_string(source_ns));
+        w.Key("shared_bars");
+        if (shared_bars.enabled()) {auto value=shared_bars.snapshot();w.RawValue(value.c_str(),value.size(),rapidjson::kObjectType);}
+        else w.Null();
         w.Key("sequence"); w.Uint64(sequence); w.Key("event_ms"); w.Uint64(event_ms); text("received_at", received_at);
         w.Key("stopping"); w.Bool(stopping); text("engine", engine.liveSnapshot()); text("trader", trader->liveSnapshot());
         text("bar_input", bar_input); w.Key("bar_phase"); w.Uint(bar_phase);
@@ -314,9 +359,29 @@ private:
         w.EndObject(); return buffer.GetString();
     }
     void restore(const Value& d) {
-        if (integer(d, "version") != 1 || text(d, "mode") != mode || text(d, "instrument_id") != code)
+        const auto version = integer(d,"version");
+        if ((version != 1 && version != 2) || text(d, "mode") != mode || text(d, "instrument_id") != code)
             throw std::invalid_argument("Joint native checkpoint identity mismatch");
         auto restoredSequence = integer(d, "sequence"), restoredTime = integer(d, "event_ms");
+        const bool beginShared = shared_bars.enabled() && (version == 1 || field(d,"shared_bars").IsNull());
+        if (beginShared) {
+            auto savedEngine = parse(text(d,"engine"));
+            auto savedClock = parse(text(savedEngine,"clock"));
+            if (mode != "paper" || !field(savedClock,"ended").IsBool() || !field(savedClock,"ended").GetBool()
+                || !field(d,"active_bar").IsNull() || readUint32(d,"bar_phase"))
+                throw std::invalid_argument("Shared input transition requires a completed historical paper day");
+        }
+        paper_sequence = version == 1 ? restoredSequence : integer(d,"paper_sequence");
+        if (paper_sequence > restoredSequence) throw std::invalid_argument("Paper cursor exceeds owner cursor");
+        if (version == 2) {
+            const auto& shared = field(d,"shared_bars");
+            if (!shared.IsNull() && !shared_bars.enabled()) throw std::invalid_argument("Shared bar checkpoint mode changed");
+            if (!shared.IsNull()) shared_bars.restore(shared);
+            const auto source=text(d,"source_ns");
+            if (source.empty() || source.size()>20 || source.find_first_not_of("0123456789")!=std::string::npos)
+                throw std::invalid_argument("Invalid quote source cursor");
+            source_ns=std::stoull(source);
+        }
         auto received = text(d, "received_at"); const auto& stop = field(d, "stopping");
         if (!stop.IsBool()) throw std::invalid_argument("Invalid controlled stop state");
         auto restoredBar = text(d, "bar_input"); auto restoredPhase = readUint32(d, "bar_phase");
@@ -341,6 +406,7 @@ private:
             paper = paperResult(trader->paperControl(b.GetString()));
         }
         trader->restoreLive(text(d, "trader")); engine.restoreLive(text(d, "engine"));
+        if (beginShared) data.controlledBeginShared();
         trader->stampLiveInput(restoredSequence, restoredTime, received, engine.getTradingDate());
         sequence = restoredSequence; event_ms = restoredTime; received_at = std::move(received);
         bar_input = std::move(restoredBar); bar_phase = restoredPhase;
@@ -380,6 +446,8 @@ private:
     WTSKlineData* active_bar = nullptr;
     uint32_t bar_phase = 0;
     uint64_t generation = 0, sequence = 0, event_ms = 0;
+    uint64_t paper_sequence = 0, source_ns = 0;
+    ControlledBars shared_bars;
     bool consuming = false, failed = false, started = false, connected = false;
     std::atomic<bool> stopping{true};
 };

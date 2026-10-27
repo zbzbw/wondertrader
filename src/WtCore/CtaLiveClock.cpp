@@ -106,7 +106,7 @@ void WtCtaRtTicker::stepControlled(uint32_t date, uint32_t time, uint64_t event_
         const bool ending = closed == _s_info->getTradingMins();
         _engine->set_date_time(closeDate, closeTime, 0, closeTime);
         if (_store) _store->onMinuteEnd(closeDate, closeTime, ending ? _engine->getTradingDate() : 0);
-        _engine->on_schedule(closeDate, closeTime);
+        if (!_engine->shared_bars()) _engine->on_schedule(closeDate, closeTime);
         if (ending) { _session_ended = true; _engine->on_session_end(); }
     }
     _date = date; _time = time; _cur_pos = closed;

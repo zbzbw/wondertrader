@@ -56,12 +56,14 @@ private:
 	void	handle_send_multi(const EndPoint& ep, const boost::system::error_code& error, std::size_t bytes_transferred); 
 
 	void	do_receive();
+	void advance_bars();
+	std::unique_ptr<boost::asio::steady_timer> m_barTimer;
 
 	void	do_broadcast(WTSObject* data, uint32_t dataType);
 
 public:
 	bool	init(WTSVariant* cfg, WTSBaseDataMgr* bdMgr, DataManager* dtMgr);
-	void	start(int bport);
+	bool	start(int bport);
 	void	stop();
 
 	bool	addBRecver(const char* remote, int port, int type = 0);

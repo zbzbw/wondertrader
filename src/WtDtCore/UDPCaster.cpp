@@ -9,6 +9,8 @@
  */
 #include "UDPCaster.h"
 #include "DataManager.h"
+#include "LiveBarCalendar.h"
+#include "LiveBarWire.h"
 
 #include "../Share/StrUtil.hpp"
 #include "../Includes/WTSDataDef.hpp"
@@ -93,12 +95,10 @@ bool UDPCaster::init(WTSVariant* cfg, WTSBaseDataMgr* bdMgr, DataManager* dtMgr)
 	int32_t sport = cfg->getInt32("sport");
 	if (sport == 0)
 		sport = cfg->getInt32("bport");
-	start(sport);
-
-	return true;
+	return start(sport);
 }
 
-void UDPCaster::start(int sport)
+bool UDPCaster::start(int sport)
 {
 	if (!m_listFlatRecver.empty() || !m_listJsonRecver.empty() || !m_listRawRecver.empty())
 	{
@@ -114,9 +114,14 @@ void UDPCaster::start(int sport)
 	catch(...)
 	{
 		WTSLogger::error("Exception raised while start subscribing service @ port {}", sport);
+		return false;
 	}
 
 	do_receive();
+	if (m_dtMgr) {
+		m_barTimer.reset(new boost::asio::steady_timer(m_ioservice));
+		advance_bars();
+	}
 
 	m_thrdIO.reset(new StdThread([this](){
 		try
@@ -128,6 +133,7 @@ void UDPCaster::start(int sport)
 			m_ioservice.stop();
 		}
 	}));
+	return true;
 }
 
 void UDPCaster::stop()
@@ -155,6 +161,16 @@ void UDPCaster::stop()
 	}
 }
 
+void UDPCaster::advance_bars()
+{
+	m_barTimer->expires_after(std::chrono::milliseconds(100));
+	m_barTimer->async_wait([this](const boost::system::error_code& error) {
+		if (error) return;
+		m_dtMgr->advanceBars(LiveBarCalendar::now());
+		advance_bars();
+	});
+}
+
 void UDPCaster::do_receive()
 {
 	m_sktSubscribe->async_receive_from(boost::asio::buffer(m_data, max_length), m_senderEP,
@@ -166,7 +182,16 @@ void UDPCaster::do_receive()
 			return;
 		}
 
-		if (bytes_recvd == sizeof(UDPReqPacket))
+		uint32_t kind = 0;
+		if (bytes_recvd >= 4)
+			for (int i = 0; i < 4; ++i) kind |= uint32_t(static_cast<unsigned char>(m_data[i])) << (i * 8);
+		if (kind >= LiveBarWire::Enumerate && kind <= LiveBarWire::Current) {
+			auto data = std::make_shared<std::string>(m_dtMgr->queryBars(m_data, bytes_recvd));
+			const auto endpoint = m_senderEP;
+			m_sktSubscribe->async_send_to(boost::asio::buffer(*data), endpoint,
+				[data](const boost::system::error_code&, std::size_t) {});
+		}
+		else if (bytes_recvd == sizeof(UDPReqPacket))
 		{
 			UDPReqPacket* req = (UDPReqPacket*)m_data;
 
@@ -174,7 +199,7 @@ void UDPCaster::do_receive()
 			//处理请求
 			if (req->_type == UDP_MSG_SUBSCRIBE)
 			{
-				const StringVector& ay = StrUtil::split(req->_data, ",");
+				const StringVector& ay = StrUtil::split(std::string(req->_data, strnlen(req->_data, sizeof(req->_data))), ",");
 				std::string code, exchg;
 				for(const std::string& fullcode : ay)
 				{

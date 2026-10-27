@@ -16,6 +16,8 @@
 #include <map>
 #include <mutex>
 #include <atomic>
+#include "LiveTickState.h"
+#include "LiveBarSeries.h"
 #include <set>
 
 NS_WTP_BEGIN
@@ -41,6 +43,14 @@ public:
 
 public:
 	bool init(WTSVariant* params, WTSBaseDataMgr* bdMgr, StateMonitor* stMonitor);
+	bool initBars(WTSVariant* config, uint64_t now_ns);
+	void advanceBars(uint64_t now_ns);
+	std::string queryBars(const char* packet, size_t length);
+	void parserSubscriptions(const std::string& id, const CodeSet& codes, uint64_t now_ns);
+	void parserEvent(const std::string& id, WTSParserEvent event, int32_t error, uint64_t now_ns);
+	void parserSubscription(const std::string& id, const char* code, bool accepted, uint64_t now_ns);
+	void rejectTick(const char* code, const char* exchange, uint64_t now_ns);
+	void rejectParserTick(const std::string& id, const char* code, const char* exchange, uint64_t now_ns);
 
 	void add_ext_dumper(const char* id, IHisDataDumper* dumper);
 
@@ -62,7 +72,7 @@ public:
 		uint64_t& accepted, uint64_t& persisted, uint64_t& segment, bool& capacity_exhausted);
 
 
-	bool writeTick(WTSTickData* curTick, uint32_t procFlag);
+	bool writeTick(WTSTickData* curTick, uint32_t procFlag, uint64_t received_ns = 0);
 
 	bool writeOrderQueue(WTSOrdQueData* curOrdQue);
 
@@ -105,7 +115,32 @@ public:
 	virtual void outputLog(WTSLogLevel ll, const char* message) override;
 
 private:
-	bool updateLatest(WTSTickData* tick, uint32_t procFlag);
+	bool loadWriter();
+	struct BarInput {
+		WTSContractInfo* contract = nullptr;
+		std::string parser;
+		bool connected = false, subscribed = false;
+		uint64_t status_since = 0;
+		std::vector<size_t> series;
+	};
+	struct BarEntry {
+		std::unique_ptr<LiveBarSeries> value;
+		BarInput* input = nullptr;
+		uint32_t day = 0, minutes = 0;
+	};
+	void markInput(BarInput& input, uint64_t now_ns);
+	void markRejected(const std::string& code, uint32_t reason, uint64_t now_ns);
+	void advanceSeries(BarEntry& entry, uint64_t now_ns);
+	std::map<std::string, LiveTickState> _tick_states;
+	std::map<std::string, BarInput> _bar_inputs;
+	std::map<std::pair<std::string, std::string>, BarInput*> _bar_subscriptions;
+	std::vector<BarEntry> _bar_series;
+	std::vector<std::pair<std::string, std::string>> _bar_names;
+	std::map<std::pair<std::string, std::string>, size_t> _bar_index;
+	std::string _bar_stream;
+	size_t _bar_clock_index = 0;
+	uint64_t _bar_delay = 2000000000ULL, _bar_joined = 0, _bar_clock_ns = 0;
+	bool updateLatest(WTSTickData* tick, uint32_t procFlag, uint64_t received_ns);
 	std::mutex _latest_mtx;
 	std::map<std::string, WTSTickStruct> _latest_ticks;
 	std::mutex _writer_mtx;

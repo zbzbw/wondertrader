@@ -1614,10 +1614,10 @@ WTSKlineSlice* CtaStraBaseCtx::stra_get_bars(const char* stdCode, const char* pe
 		//如果K线获取不到,说明也不会有闭合事件发生,所以不更新本地标记
 		bool isFirst = (_kline_tags.find(key) == _kline_tags.end());	//如果没有保存标记,说明是第一次拉取该K线
 		KlineTag& tag = _kline_tags[key];
-		tag._closed = false;
+		tag._closed = _engine->shared_bars();
 
 		double lastClose = kline->at(-1)->close;
-		_price_map[stdCode] = lastClose;
+		if (!_engine->shared_bars()) _price_map[stdCode] = lastClose;
 
 		if(isMain && isFirst && !_condtions.empty())
 		{

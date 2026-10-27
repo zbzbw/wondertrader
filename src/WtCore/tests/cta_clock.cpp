@@ -4,6 +4,7 @@
 #include "../../Includes/WTSDataDef.hpp"
 #include "../../Includes/WTSRiskDef.hpp"
 #include "../../WTSTools/WTSBaseDataMgr.h"
+#include "../../WTSTools/WTSHotMgr.h"
 #include "../../WTSUtils/WTSCfgLoader.h"
 #include "../../Includes/WTSVariant.hpp"
 #include <fstream>
@@ -50,12 +51,17 @@ class Context : public CtaStraBaseCtx {
 public:
     Context(WtCtaEngine* engine) : CtaStraBaseCtx(engine, "cross", 0) {}
     void on_calculate(uint32_t, uint32_t) override {}
-    void on_bar_close(const char*, const char*, WTSBarStruct*) override {}
+    std::function<void(const char*, const char*)> bar_callback;
+    void on_bar_close(const char* code, const char* period, WTSBarStruct*) override {
+        if (bar_callback) bar_callback(code, period);
+    }
+    bool pricesEmpty() const { return _price_map.empty(); }
 };
 void configure(Engine& engine, WtDtMgr& data, WTSBaseDataMgr& base, const char* session) {
     const std::string json = std::string("{\"controlled\":true,\"poolsize\":0,\"product\":{\"session\":\"") + session + "\"}}";
     auto config = WTSCfgLoader::load_from_content(json);
-    engine.init(config, &base, &data, nullptr, nullptr); config->release();
+    static WTSHotMgr hot;
+    engine.init(config, &base, &data, &hot, nullptr); config->release();
     auto dataConfig = WTSVariant::createObject();
     check(data.init(dataConfig, &engine, true), "controlled data manager must not need a disk reader"); dataConfig->release();
 }
@@ -116,7 +122,8 @@ int main() {
         auto latest = nextData.get_kline_slice("SHFE.rb.2609", KP_Minute5, 1, 1);
         check(latest && latest->at(0)->close == 3505 && latest->at(0)->vol == 17, "native completed bar survives restore"); latest->release();
         rejects([&] { nextData.controlledBar("SHFE.rb.2609", bar, false); });
-        rejects([&] { nextData.get_kline_slice("SHFE.rb.2609", KP_Minute5, 1, 2); });
+        auto history = nextData.get_kline_slice("SHFE.rb.2609", KP_Minute5, 1, 2);
+        check(history && history->size() == 1, "bounded history returns available closed values"); history->release();
         complete.stepControlled(20260911, 210100000, 11); next.stepControlled(20260911, 210100000, 11);
         check(complete.liveSnapshot() == next.liveSnapshot(), "next controlled event after joint restore matches uninterrupted state");
         WtDtMgr badData; Engine bad; configure(bad, badData, base, "rb"); bad.addContext(std::make_shared<Context>(&bad));
@@ -124,6 +131,59 @@ int main() {
         corrupt.replace(at, 5, "wrong"); rejects([&] { bad.restoreLive(corrupt); });
         check(bad.emptyState(), "late context decode failure must not partially restore the engine");
         bad.startControlled(20260911, 210000000, 20260914, 10);
-        std::cout << "CTA controlled clock regression passed\n"; return 0;
+        const char* commodities = "cta-clock-commodities.json";
+        { std::ofstream f(commodities); f << R"({"SHFE":{"rb":{"name":"rb","session":"rb","holiday":"CHINA","volscale":10,"pricetick":1,"precision":0,"covermode":1,"pricemode":0,"trademode":0}}})"; }
+        check(base.loadCommodities(commodities), "load multi-series commodity fixture"); std::remove(commodities);
+        WtDtMgr sharedData; Engine shared; configure(shared, sharedData, base, "rb");
+        auto strategy = std::make_shared<Context>(&shared); shared.addContext(strategy);
+        sharedData.controlledVisibility(100);
+        const char* codes[] = {"SHFE.rb.2609", "SHFE.rb.2610"};
+        for (auto code : codes) for (auto minutes : {5u, 60u}) {
+            auto period = std::string("m") + std::to_string(minutes);
+            check(!strategy->stra_get_bars(code, period.c_str(), 2), "empty configured sequence has no manufactured bar");
+            strategy->stra_sub_bar_events(code, period.c_str());
+            sharedData.controlledLoadBar(code, bar, KP_Minute1, minutes, 100, 2);
+        }
+        auto later = bar; later.time += 100; later.close = 3506;
+        sharedData.controlledLoadBar(codes[0], later, KP_Minute1, 5, 200, 2);
+        auto partial = sharedData.liveSnapshot();
+        auto prior = strategy->stra_get_bars(codes[0], "m5", 2);
+        check(prior && prior->size() == 1 && prior->at(-1)->close == 3505, "partial group load keeps previous visible time"); prior->release();
+        rejects([&] { sharedData.controlledNotify(codes[0], KP_Minute1, 5, 200); });
+        WtDtMgr resumeData; Engine resume; configure(resume, resumeData, base, "rb");
+        resumeData.restoreLive(partial);
+        check(resumeData.liveSnapshot() == partial, "partial multi-series cache snapshot round trip");
+        for (auto code : codes) for (auto minutes : {5u, 60u}) {
+            if (std::string(code) == codes[0] && minutes == 5) continue;
+            sharedData.controlledLoadBar(code, later, KP_Minute1, minutes, 200, 2);
+            resumeData.controlledLoadBar(code, later, KP_Minute1, minutes, 200, 2);
+        }
+        sharedData.controlledVisibility(200); resumeData.controlledVisibility(200);
+        check(sharedData.liveSnapshot() == resumeData.liveSnapshot(), "restored load exposes identical complete group");
+        auto future = later; future.time += 5; future.close = 3507;
+        sharedData.controlledLoadBar(codes[0], future, KP_Minute1, 5, 300, 2);
+        unsigned notifications = 0;
+        strategy->bar_callback = [&](const char*, const char*) {
+            for (auto code : codes) for (auto period : {"m5", "m60"}) {
+                auto visible = strategy->stra_get_bars(code, period, 2);
+                check(visible && visible->at(-1)->close == 3506, "all same-time callbacks see all inputs through T only");
+                visible->release();
+            }
+            ++notifications;
+        };
+        shared.controlledDecisions(true);
+        for (auto code : codes) for (auto minutes : {5u, 60u})
+            sharedData.controlledNotify(code, KP_Minute1, minutes, 200);
+        check(notifications == 4 && strategy->pricesEmpty(), "real native bar callbacks do not create execution prices");
+        auto daily = bar; daily.time = 0;
+        sharedData.controlledLoadBar(codes[0], daily, KP_DAY, 1, 200, 2);
+        auto day = sharedData.get_kline_slice(codes[0], KP_DAY, 1, 2);
+        check(day && day->at(-1)->date == bar.date, "daily cache uses its actual day and independent close time"); day->release();
+        // Version 1 contains only the old single m5 value; migration must not
+        // manufacture another series or shared source coverage.
+        auto old = std::string(R"({"version":1,"bars":{"SHFE.rb.2609":{"date":20260911,"time":3609112100,"reserve_":0,"open":3500,"high":3510,"low":3490,"close":3505,"settle":0,"money":0,"vol":17,"hold":0,"add":0}},"ticks":{}})");
+        WtDtMgr legacyData; Engine legacy; configure(legacy, legacyData, base, "rb"); legacyData.restoreLive(old);
+        check(!legacyData.controlledSharedBars() && !legacyData.get_kline_slice(codes[1], KP_Minute1, 5, 1), "legacy snapshot maps only its original m5 series");
+        std::cout << "CTA controlled clock and multi-series cache regression passed\n"; return 0;
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

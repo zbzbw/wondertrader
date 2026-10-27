@@ -9,6 +9,7 @@
  */
 #include "WtDtRunner.h"
 #include "ExpParser.h"
+#include "../WtDtCore/LiveBarCalendar.h"
 
 #include "../WtDtCore/WtHelper.h"
 
@@ -199,6 +200,13 @@ bool WtDtRunner::initialize(const char* cfgFile, const char* logCfg, const char*
 		return false;
 	}
 
+	if (!_data_mgr.initBars(config->get("bars"), LiveBarCalendar::now()) ||
+		(config->has("bars") && (!config->has("broadcaster") || !config->get("broadcaster")->getBoolean("active")))) {
+		WTSLogger::error("Shared bars require valid configuration and the active UDP query clock");
+		config->release();
+		return false;
+	}
+
 	if (config->has("shmcaster"))
 	{
 		_shm_caster.init(config->get("shmcaster"));
@@ -207,7 +215,11 @@ bool WtDtRunner::initialize(const char* cfgFile, const char* logCfg, const char*
 
 	if(config->has("broadcaster"))
 	{
-		_udp_caster.init(config->get("broadcaster"), &_bd_mgr, &_data_mgr);
+		if (!_udp_caster.init(config->get("broadcaster"), &_bd_mgr, &_data_mgr) && config->has("bars")) {
+			WTSLogger::error("Shared bar UDP query service failed to start");
+			config->release();
+			return false;
+		}
 		_data_mgr.add_caster(&_udp_caster);
 	}
 

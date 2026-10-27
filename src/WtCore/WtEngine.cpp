@@ -611,6 +611,11 @@ WTSTickData* WtEngine::get_last_tick(uint32_t sid, const char* stdCode)
 	return _data_mgr->grab_last_tick(stdCode);
 }
 
+bool WtEngine::shared_bars() const
+{
+	return _controlled && _data_mgr && _data_mgr->controlledSharedBars();
+}
+
 WTSKlineSlice* WtEngine::get_kline_slice(uint32_t sid, const char* stdCode, const char* period, uint32_t count, uint32_t times /* = 1 */, uint64_t etime /* = 0 */)
 {
 	CodeHelper::CodeInfo codeInfo = CodeHelper::extractStdCode(stdCode, _hot_mgr);

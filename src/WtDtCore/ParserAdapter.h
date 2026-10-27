@@ -46,6 +46,9 @@ public:
 	const ContractSet& subscriptions() const { return _subscriptions; }
 
 public:
+	virtual void handleEvent(WTSParserEvent event, int32_t error) override;
+	virtual void handleSubscription(const char* code, bool accepted) override;
+
 	virtual void handleSymbolList(const WTSArray* aySymbols) override;
 
 	virtual void handleQuote(WTSTickData *quote, uint32_t procFlag) override;

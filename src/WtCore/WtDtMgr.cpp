@@ -423,12 +423,7 @@ WTSKlineSlice* WtDtMgr::get_kline_slice(const char* stdCode, WTSKlinePeriod peri
 {
 	if (_engine->controlled())
 	{
-		// The approved installed strategy requests the latest completed m5 bar;
-		// its 60-close indicator window belongs to the strategy checkpoint.
-		if (period != KP_Minute5 || times != 1 || count != 1 || etime != 0)
-			throw std::invalid_argument("Controlled strategy requires the latest completed m5 bar");
-		auto data = _bars_cache ? static_cast<WTSKlineData*>(_bars_cache->get(stdCode)) : nullptr;
-		return data ? WTSKlineSlice::create(stdCode, period, 1, data->at(0), 1) : nullptr;
+		return controlledSlice(stdCode, period, times, count, etime);
 	}
 	if (_reader == NULL)
 		return NULL;

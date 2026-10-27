@@ -9,6 +9,7 @@
  */
 #pragma once
 #include <vector>
+#include <map>
 #include "../Includes/IDataReader.h"
 #include "../Includes/IDataManager.h"
 
@@ -41,6 +42,14 @@ public:
 
 	void	handle_push_quote(const char* stdCode, WTSTickData* newTick);
 	void controlledBar(const char* stdCode, const WTSBarStruct& bar, bool notify);
+	void controlledLoadBar(const char* stdCode, const WTSBarStruct& bar, WTSKlinePeriod period,
+		uint32_t times, uint64_t end_ns, uint32_t history_count);
+	void controlledVisibility(uint64_t through_ns);
+	void controlledBeginShared();
+	bool controlledSharedBars() const { return _controlled_shared_bars; }
+	void controlledNotify(const char* stdCode, WTSKlinePeriod period, uint32_t times, uint64_t end_ns);
+	WTSKlineSlice* controlledSlice(const char* stdCode, WTSKlinePeriod period, uint32_t times,
+		uint32_t count, uint64_t etime);
 	std::string liveSnapshot() const;
 	void restoreLive(const std::string& state);
 
@@ -83,6 +92,9 @@ private:
 	wt_hashset<std::string> _subed_basic_bars;
 	typedef WTSHashMap<std::string> DataCacheMap;
 	DataCacheMap*	_bars_cache;	//K线缓存
+	std::map<std::string, std::vector<uint64_t>> _controlled_bar_ends;
+	uint64_t _controlled_visible_ns = UINT64_MAX;
+	bool _controlled_shared_bars = false;
 	DataCacheMap*	_rt_tick_map;	//实时tick缓存
 	//By Wesley @ 2022.02.11
 	//这个只有后复权tick数据

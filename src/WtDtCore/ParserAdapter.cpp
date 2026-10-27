@@ -9,6 +9,7 @@
  */
 #include "ParserAdapter.h"
 #include "DataManager.h"
+#include "LiveBarCalendar.h"
 #include "StateMonitor.h"
 #include "WtHelper.h"
 #include "IndexWorkerMgr.h"
@@ -69,6 +70,7 @@ bool ParserAdapter::initExt(const char* id, IParserApi* api)
 			ayContract->release();
 
 			_subscriptions = contractSet;
+			_dt_mgr->parserSubscriptions(_id, contractSet, LiveBarCalendar::now());
 			_parser_api->subscribe(contractSet);
 			contractSet.clear();
 		}
@@ -190,6 +192,7 @@ bool ParserAdapter::init(const char* id, WTSVariant* cfg)
 			}
 
 			_subscriptions = contractSet;
+			_dt_mgr->parserSubscriptions(_id, contractSet, LiveBarCalendar::now());
 			_parser_api->subscribe(contractSet);
 			contractSet.clear();
 		}
@@ -222,6 +225,7 @@ void ParserAdapter::release()
 
 void ParserAdapter::stop()
 {
+	_dt_mgr->parserEvent(_id, WPE_Close, 0, LiveBarCalendar::now());
 	_stopped.store(true);
 }
 
@@ -232,6 +236,16 @@ bool ParserAdapter::run()
 
 	_parser_api->connect();
 	return true;
+}
+
+void ParserAdapter::handleEvent(WTSParserEvent event, int32_t error)
+{
+	if (!_stopped) _dt_mgr->parserEvent(_id, event, error, LiveBarCalendar::now());
+}
+
+void ParserAdapter::handleSubscription(const char* code, bool accepted)
+{
+	if (!_stopped) _dt_mgr->parserSubscription(_id, code, accepted, LiveBarCalendar::now());
 }
 
 void ParserAdapter::handleSymbolList( const WTSArray* aySymbols )
@@ -295,8 +309,10 @@ void ParserAdapter::handleQuote( WTSTickData *quote, uint32_t procFlag )
 	if (_stopped)
 		return;
 
-	if (quote->actiondate() == 0 || quote->tradingdate() == 0)
+	if (quote->actiondate() == 0 || quote->tradingdate() == 0) {
+		_dt_mgr->rejectParserTick(_id, quote->code(), quote->exchg(), LiveBarCalendar::now());
 		return;
+	}
 
 	WTSContractInfo* contract = quote->getContractInfo();
 	if (contract == NULL)
@@ -305,8 +321,10 @@ void ParserAdapter::handleQuote( WTSTickData *quote, uint32_t procFlag )
 		quote->setContractInfo(contract);
 	}
 
-	if (contract == NULL)
+	if (contract == NULL) {
+		_dt_mgr->rejectParserTick(_id, quote->code(), quote->exchg(), LiveBarCalendar::now());
 		return;
+	}
 
 	if (!_dt_mgr->writeTick(quote, procFlag))
 		return;
