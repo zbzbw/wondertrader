@@ -159,6 +159,39 @@ TEST(test_live_bars, cumulative_baseline_duplicates_and_reconnect_preserve_sourc
     EXPECT_EQ(state.normalize(input, start + 3 * minute, output, true), LiveTickState::Baseline);
 }
 
+TEST(test_live_bars, retained_window_starts_new_consumers_without_resetting_old_cursors)
+{
+    Session session;
+    LiveBarSeries bars("SHFE.rb.2610", session.value, 1, 2, 0);
+    bars.setWindows({{start,start+minute,20261027}, {start+minute,start+2*minute,20261027},
+        {start+2*minute,start+3*minute,20261027}}, start);
+    for (uint32_t i = 0; i < 3; ++i) {
+        ASSERT_TRUE(put(bars,90000000+i*100000,start+i*minute,10+i,2));
+        ASSERT_TRUE(bars.advance(start+(i+1)*minute));
+    }
+    const auto expired = bars.read(0,start+3*minute);
+    EXPECT_TRUE(expired.expired);
+    EXPECT_EQ(expired.earliest,2);
+    LiveBarWire::Request req;
+    req.type=LiveBarWire::Current; req.request_id=1; req.code="SHFE.rb.2610"; req.frequency="1m";
+    auto wire=LiveBarWire::current(req,"retained",bars.current(),bars.processedThrough(),expired);
+    rapidjson::Document current;
+    current.Parse(wire.data()+4,wire.size()-4);
+    ASSERT_FALSE(current.HasParseError());
+    const auto after=LiveBarWire::number(current["earliest"])-1;
+    EXPECT_EQ(after,1);
+    auto page=bars.read(after,start+3*minute);
+    ASSERT_FALSE(page.expired);
+    ASSERT_TRUE(page.interval.has_value());
+    EXPECT_EQ(page.interval->sequence,2);
+    EXPECT_EQ(page.interval->bar->close,11);
+    page=bars.read(page.next,start+3*minute);
+    ASSERT_TRUE(page.interval.has_value());
+    EXPECT_EQ(page.interval->sequence,3);
+    EXPECT_FALSE(page.has_more);
+    EXPECT_TRUE(bars.read(0,start+3*minute).expired);
+}
+
 TEST(test_live_bars, all_wire_pages_remain_bounded_for_ten_thousand_series)
 {
     using namespace LiveBarWire;
@@ -193,7 +226,7 @@ TEST(test_live_bars, all_wire_pages_remain_bounded_for_ten_thousand_series)
     row.bar = bar;
     result.interval = row;
     EXPECT_LE(page(req, stream, result).size(), MaxPacket);
-    EXPECT_LE(current(req, stream, result.interval, UINT64_MAX).size(), MaxPacket);
+    EXPECT_LE(current(req, stream, result.interval, UINT64_MAX, result).size(), MaxPacket);
     result.interval.reset();
     EXPECT_LE(page(req, stream, result).size(), MaxPacket);
     EXPECT_LE(error(req, stream, "cursor_expired").size(), MaxPacket);

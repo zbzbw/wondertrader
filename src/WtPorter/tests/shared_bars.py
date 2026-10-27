@@ -11,11 +11,12 @@ through = (origin + 3_600_000) * 1_000_000
 bindings = dict(stream="shared-test", history_count=120, series=[
     [code, frequency] for code in ("SHFE.rb.2609", "SHFE.rb.2610") for frequency in ("1h", "5m")
 ])
+bindings["cursors"] = {code + "/" + frequency: "7" for code, frequency in bindings["series"]}
 
 
 def run_shared(dll, call, context, restore):
     dll.wt_live_shared_bars_abi.restype = C.c_uint32
-    assert dll.wt_live_shared_bars_abi() == 1
+    assert dll.wt_live_shared_bars_abi() == 2
     get_type = C.CFUNCTYPE(None, C.c_ulong, C.c_char_p, C.c_char_p, C.POINTER(Bar), C.c_uint32, C.c_bool)
     bar_type = C.CFUNCTYPE(None, C.c_ulong, C.c_char_p, C.c_char_p, C.POINTER(Bar))
     dll.cta_get_bars.argtypes = [C.c_ulong, C.c_char_p, C.c_char_p, C.c_uint32, C.c_bool, get_type]
@@ -51,13 +52,13 @@ def run_shared(dll, call, context, restore):
     for code, f in bindings["series"]:
         entries.append(dict(instrument_id=code, frequency=f, tail=coverage,
             input_status=dict(input=[True, True, False, str(through)], processed_through_ns=str(through)),
-            interval=dict(sequence="1", trading_day=20260909, start_ns=str(through - (3600 if f == "1h" else 300)*1_000_000_000),
+                interval=dict(sequence="8", trading_day=20260909, start_ns=str(through - (3600 if f == "1h" else 300)*1_000_000_000),
                 end_ns=str(through), coverage=coverage,
                 bar=dict(open=3500, high=3500, low=3500, close=3500, volume=100, turnover=3500000, open_interest=20))))
     docs = {2: dict(action="load",entries=entries[:2]), 3: dict(action="load",entries=entries[2:])}
     for position, seq in enumerate((4, 6, 7, 8)):
         code,f = bindings["series"][position]
-        docs[seq] = dict(action="notify",position=position,notify=dict(instrument_id=code,frequency=f,sequence="1"))
+        docs[seq] = dict(action="notify",position=position,notify=dict(instrument_id=code,frequency=f,sequence="8"))
     start = json.loads(restore.read_text())["sequence"] if restore else 0
     before_callbacks = sum(seq <= start for seq in (4,6,7,8))
     for seq in range(start + 1, 10):

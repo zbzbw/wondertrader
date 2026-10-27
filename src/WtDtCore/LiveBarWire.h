@@ -190,6 +190,7 @@ inline std::string current(const Request& req, const std::string& stream,
     rapidjson::StringBuffer json; Writer w(json); head(w, req, stream, "ok");
     w.Key("instrument_id"); w.String(req.code.c_str());
     w.Key("frequency"); w.String(req.frequency.c_str());
+    ns(w, "earliest", state.earliest);
     ns(w, "processed_through_ns", processed);
     w.Key("input"); w.StartArray(); w.Bool(state.connected); w.Bool(state.subscribed);
     w.Bool(state.session_closed); w.String(std::to_string(state.observed_ns).c_str()); w.EndArray();

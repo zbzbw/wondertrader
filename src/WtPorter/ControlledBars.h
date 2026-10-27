@@ -86,11 +86,15 @@ public:
         if (stream.empty() || stream.size() > 36 || !history || history > 100000)
             throw std::invalid_argument("Invalid shared bar configuration");
         const auto& series = field(config,"series");
+        const auto& cursors = field(config,"cursors");
         if (!series.IsArray() || series.Empty()) throw std::invalid_argument("Shared bars require bound inputs");
+        if (!cursors.IsObject() || cursors.MemberCount() != series.Size())
+            throw std::invalid_argument("Shared bar cursors must match the bound inputs");
         for (const auto& row : series.GetArray()) {
             if (!row.IsArray() || row.Size() != 2) throw std::invalid_argument("Invalid shared bar binding");
             Key k{text(row[0]),text(row[1])}; minutes(k.second);
-            if (!engine.get_contract_info(k.first.c_str()) || !positions.emplace(k, Position{}).second)
+            const auto cursor = ns(field(cursors,(k.first + "/" + k.second).c_str()));
+            if (!engine.get_contract_info(k.first.c_str()) || !positions.emplace(k, Position{cursor,false}).second)
                 throw std::invalid_argument("Unknown or duplicate shared bar binding");
         }
         data.controlledVisibility(0);
