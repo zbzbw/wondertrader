@@ -32,6 +32,19 @@ typedef struct _WtDtStopResult
 	uint64_t persisted_offset;
 } WtDtStopResult;
 
+typedef struct _WtRecordingResult
+{
+	uint8_t recording;
+	uint8_t failed;
+	uint8_t writer_drained;
+	uint8_t checkpoint_persisted;
+	uint8_t reserved[4];
+	uint64_t received_offset;
+	uint64_t accepted_offset;
+	uint64_t persisted_offset;
+	uint64_t segment;
+} WtRecordingResult;
+
 //////////////////////////////////////////////////////////////////////////
 //扩展Parser回调函数
 static const WtUInt32	EVENT_PARSER_INIT = 1;	//Parser初始化

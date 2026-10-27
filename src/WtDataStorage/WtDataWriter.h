@@ -55,6 +55,12 @@ public:
 	virtual void release() override;
 	virtual bool stopAndDrain(DataWriterStopResult& result) override;
 
+	virtual void recordingOffsets(uint64_t& accepted, uint64_t& persisted, bool& failed) const override
+	{
+		accepted = _received_offset.load();
+		persisted = _persisted_offset.load();
+		failed = _processing_failed.load();
+	}
 	virtual bool writeTick(WTSTickData* curTick, uint32_t procFlag) override;
 
 	virtual bool writeOrderQueue(WTSOrdQueData* curOrdQue) override;

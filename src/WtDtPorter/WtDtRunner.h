@@ -38,6 +38,7 @@ public:
 public:
 	void	initialize(const char* cfgFile, const char* logCfg, const char* modDir = "", bool bCfgFile = true, bool bLogCfgFile = true);
 	void	start(bool bAsync = false, bool bAlldayMode = false);
+	bool recordingControl(uint32_t action, WtRecordingResult& result);
 	bool	requestStop();
 	bool	stopAndFlush(WtDtStopResult& result);
 
@@ -111,5 +112,7 @@ private:
 	std::atomic<bool> _stop_requested;
 	std::mutex _stop_mtx;
 	bool _stop_completed;
+	bool _have_recording_stop = false;
+	WtRecordingResult _recording_stop;
 };
 

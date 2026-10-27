@@ -64,6 +64,11 @@ void start(bool bAsync/* = false*/)
 	getRunner().start(bAsync);
 }
 
+bool recording_control(WtUInt32 action, WtRecordingResult* result)
+{
+	return result != NULL && getRunner().recordingControl(action, *result);
+}
+
 bool request_stop()
 {
 	return getRunner().requestStop();

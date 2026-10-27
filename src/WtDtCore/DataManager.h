@@ -12,6 +12,10 @@
 #include "../Includes/IDataWriter.h"
 #include "../Share/StdUtils.hpp"
 #include "../Share/BoostMappingFile.hpp"
+#include "../Includes/WTSDataDef.hpp"
+#include <map>
+#include <mutex>
+#include <atomic>
 
 NS_WTP_BEGIN
 class WTSTickData;
@@ -49,6 +53,11 @@ public:
 
 	void release();
 	bool stopAndFlush(DataWriterStopResult& result);
+	bool startRecording();
+	bool stopRecording(DataWriterStopResult& result);
+	void recordingStatus(bool& recording, bool& failed, uint64_t& received,
+		uint64_t& accepted, uint64_t& persisted, uint64_t& segment);
+
 
 	bool writeTick(WTSTickData* curTick, uint32_t procFlag);
 
@@ -93,6 +102,21 @@ public:
 	virtual void outputLog(WTSLogLevel ll, const char* message) override;
 
 private:
+	bool updateLatest(WTSTickData* tick, uint32_t procFlag);
+	std::mutex _latest_mtx;
+	std::map<std::string, WTSTickStruct> _latest_ticks;
+	std::mutex _writer_mtx;
+	WTSVariant* _writer_params;
+	FuncCreateWriter _creator;
+	std::string _base_path;
+	uint64_t _segment;
+	std::atomic<uint64_t> _received;
+	bool _recording;
+	bool _recording_failed;
+	DataWriterStopResult _last_drain;
+	uint64_t _accepted_total;
+	uint64_t _persisted_total;
+	ExtDumpers _ext_dumpers;
 	IDataWriter*		_writer;
 	FuncDeleteWriter	_remover;
 	bool				_writer_ready;

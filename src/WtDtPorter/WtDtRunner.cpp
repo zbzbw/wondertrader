@@ -444,6 +444,42 @@ bool WtDtRunner::dumpHisTrans(const char* id, const char* stdCode, uint32_t uDat
 	return _dumper_for_trans(id, stdCode, uDate, items, count);
 }
 
+bool WtDtRunner::recordingControl(uint32_t action, WtRecordingResult& result)
+{
+	std::lock_guard<std::mutex> lock(_stop_mtx);
+	memset(&result, 0, sizeof(result));
+	if (_stop_requested.load()) return false;
+	if (action == 2 && _have_recording_stop)
+	{
+		result = _recording_stop;
+		return !result.failed;
+	}
+	bool success = true;
+	DataWriterStopResult drained;
+	if (action == 1) success = _data_mgr.startRecording();
+	else if (action == 2) success = _data_mgr.stopRecording(drained);
+	else if (action != 0) return false;
+	bool recording, failed;
+	_data_mgr.recordingStatus(recording, failed, result.received_offset,
+		result.accepted_offset, result.persisted_offset, result.segment);
+	result.recording = recording;
+	result.failed = failed;
+	result.writer_drained = action == 2 && drained.writer_drained;
+	result.checkpoint_persisted = action == 2 && drained.checkpoint_persisted;
+	if (action == 0 && !recording && _have_recording_stop)
+	{
+		result.writer_drained = _recording_stop.writer_drained;
+		result.checkpoint_persisted = _recording_stop.checkpoint_persisted;
+	}
+	if (action == 1 && success) _have_recording_stop = false;
+	if (action == 2)
+	{
+		_recording_stop = result;
+		_have_recording_stop = true;
+	}
+	return success;
+}
+
 bool WtDtRunner::requestStop()
 {
 	std::lock_guard<std::mutex> lock(_stop_mtx);

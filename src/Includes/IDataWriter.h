@@ -103,6 +103,12 @@ public:
 		return false;
 	}
 
+	virtual void recordingOffsets(uint64_t& accepted, uint64_t& persisted, bool& failed) const
+	{
+		accepted = persisted = 0;
+		failed = true;
+	}
+
 	void	add_ext_dumper(const char* id, IHisDataDumper* dumper) { _dumpers[id] = dumper; }
 
 public:
