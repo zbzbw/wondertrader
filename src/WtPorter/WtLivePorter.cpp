@@ -22,6 +22,7 @@ const char* invoke(const char* operation, const char* request = "{}", const WTST
 
 uint32_t wt_live_abi() { return 1; }
 uint32_t wt_live_paper_transition_abi() { return 1; }
+uint32_t wt_live_shared_bars_abi() { return 1; }
 const char* wt_live_configure(const char* request) { return invoke("configure", request); }
 const char* wt_live_connect() { return invoke("connect"); }
 const char* wt_live_start(const char* request) { return invoke("start", request); }

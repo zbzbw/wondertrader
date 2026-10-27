@@ -69,7 +69,7 @@ def child(porter, mocker, directory, restore=None, scenario="tick"):
         "name": "rb", "session": "day", "holiday": "CHINA", "volscale": 10,
         "pricetick": 1, "precision": 0, "covermode": 1, "pricemode": 0, "trademode": 0,
     }}})
-    write("contracts.json", {"SHFE": {"rb2609": {"name": "rb2609", "exchg": "SHFE", "product": "rb"}}})
+    write("contracts.json", {"SHFE": {code: {"name": code, "exchg": "SHFE", "product": "rb"} for code in ("rb2609", "rb2610")}})
     write("policy.json", {"default": {"order": [{"action": "open", "limit": 100}]}})
     rules = dict(contract="SHFE.rb2609", source="synthetic-test", trading_day=20260909,
                  multiplier="10", tick="1", upper_limit="4000", lower_limit="3000",
@@ -85,24 +85,32 @@ def child(porter, mocker, directory, restore=None, scenario="tick"):
     }
     dll.init_porter(encoded({"root": {"level": "warn", "sinks": [{"type": "console_sink", "pattern": "%v"}]}}), False, b"generated/")
     dll.config_porter(encoded(config), False)
-    dll.create_cta_context(b"cross", 0)
+    context = dll.create_cta_context(b"cross", 0)
     identity = dict(run_id="restored" if restore else "original", generation=2 if restore else 1)
+    shared = scenario == "shared"
+    if shared:
+        from shared_bars import bindings, origin, run_shared
     call("configure", encoded(dict(mode="paper", instrument_id="SHFE.rb.2609", trader_id="paper",
-                                   event_ms=1, received_at="synthetic:1", trading_day=20260909, **identity)))
+                                   event_ms=origin if shared else 1, received_at="synthetic:1", trading_day=20260909,
+                                   **({"bar_inputs": bindings} if shared else {}), **identity)))
     if restore:
         call("restore", restore.read_bytes())
     connected = call("connect")
     assert connected["ready"] and connected["connected"], connected
     if not restore:
         bar = Bar(date=20260909, time=3609090900, open=3500, high=3500, low=3500, close=3500, vol=4)
-        call("warmup", C.byref(bar))
-        call("start", encoded(dict(date=20260909, time=90000000, trading_day=20260909, event_ms=1, received_at="synthetic:1")))
+        if not shared: call("warmup", C.byref(bar))
+        call("start", encoded(dict(date=20260909, time=90000000, trading_day=20260909, event_ms=origin if shared else 1, received_at="synthetic:1")))
     call("arm", encoded(identity))
     if not restore:
         placed = call("submit", encoded(dict(command_id="open-1", direction="long", offset="open", price="3501", quantity="2", **identity)))
         assert placed["result"] > 0, placed
         if scenario == "bar":
             call("submit", encoded(dict(command_id="open-short", direction="short", offset="open", price="3499", quantity="2", **identity)))
+    if shared:
+        run_shared(dll, call, context, restore)
+        dll.release_porter()
+        return
     tick = Tick(exchg=b"SHFE", code=b"rb2609", price=3500, action_date=20260909,
                 action_time=90001000 if not restore else 90002000, trading_date=20260909)
     tick.ask_prices[0] = tick.bid_prices[0] = 3500
@@ -154,14 +162,22 @@ def child(porter, mocker, directory, restore=None, scenario="tick"):
 
 
 if __name__ == "__main__":
+    sys.modules["controlled"] = sys.modules[__name__]
     porter, mocker, root = (Path(arg).resolve() for arg in sys.argv[1:4])
     if len(sys.argv) > 4:
         child(porter, mocker, root, Path(sys.argv[5]).resolve() if len(sys.argv) > 5 else None, sys.argv[4])
     else:
         command = [sys.executable, str(Path(__file__).resolve()), str(porter), str(mocker)]
-        for scenario in ("tick", "bar"):
+        for scenario in ("tick", "bar", "shared"):
             output = root / scenario
             subprocess.run(command + [str(output / "original"), scenario], check=True, timeout=30)
+            if scenario == "shared":
+                for cut in (1, 2, 3, 4, 7):
+                    restored = output / f"restored-{cut}"
+                    subprocess.run(command + [str(restored), scenario, str(output / f"original/checkpoint-{cut}.json")], check=True, timeout=30)
+                    assert (output / "original/next-cut.json").read_bytes() == (restored / "next-cut.json").read_bytes()
+                print("shared bars: all five interrupted cuts equal uninterrupted execution")
+                continue
             subprocess.run(command + [str(output / "restored"), scenario, str(output / "original/checkpoint.json")], check=True, timeout=30)
             assert (output / "original/next-cut.json").read_bytes() == (output / "restored/next-cut.json").read_bytes()
             print(scenario, "restored next native cut equals uninterrupted execution")
