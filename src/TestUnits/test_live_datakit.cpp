@@ -86,8 +86,10 @@ TEST(test_live_datakit, recording_filter_stop_and_restart_leave_shared_bars_runn
 {
 #ifdef _WIN32
     _putenv_s("BWT_DATAKIT_RUN_ID", "shared-bars-recording-test");
+    _putenv_s("BWT_DATAKIT_SUBSCRIPTION_IDENTITY", "SHFE.rb2701");
 #else
     setenv("BWT_DATAKIT_RUN_ID", "shared-bars-recording-test", 1);
+    setenv("BWT_DATAKIT_SUBSCRIPTION_IDENTITY", "SHFE.rb2701", 1);
 #endif
     const auto dll = std::getenv("BWT_TEST_WRITER_DLL");
     ASSERT_NE(dll, nullptr);
