@@ -16,6 +16,7 @@
 #include <map>
 #include <mutex>
 #include <atomic>
+#include <set>
 
 NS_WTP_BEGIN
 class WTSTickData;
@@ -54,6 +55,7 @@ public:
 	void release();
 	bool stopAndFlush(DataWriterStopResult& result);
 	bool startRecording();
+	bool setRecordingInstruments(const std::set<std::string>& instruments);
 	bool stopRecording(DataWriterStopResult& result);
 	void recordingStatus(bool& recording, bool& failed, uint64_t& received,
 		uint64_t& accepted, uint64_t& persisted, uint64_t& segment);
@@ -114,6 +116,8 @@ private:
 	std::atomic<uint64_t> _last_receive_log_second;
 	bool _recording;
 	bool _recording_failed;
+	bool _recording_filter_set;
+	std::set<std::string> _recording_instruments;
 	DataWriterStopResult _last_drain;
 	uint64_t _accepted_total;
 	uint64_t _persisted_total;

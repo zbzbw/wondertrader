@@ -15,6 +15,8 @@ struct RecordingUnitProgress
 	uint64_t completed;
 	uint64_t persisted;
 	bool failed;
+	uint64_t first_received_ns = 0;
+	uint64_t last_received_ns = 0;
 
 	RecordingUnitProgress()
 		: trading_date(0), accepted(0), completed(0), persisted(0), failed(false)
@@ -39,7 +41,8 @@ public:
 		const std::string& session_id,
 		const std::string& fullcode,
 		uint32_t trading_date,
-		std::string& unit_key)
+		std::string& unit_key,
+		uint64_t received_ns = 0)
 	{
 		if (_closing_sessions.count(session_id) != 0)
 			return false;
@@ -49,6 +52,8 @@ public:
 		unit.fullcode = fullcode;
 		unit.trading_date = trading_date;
 		unit.accepted++;
+		if (unit.first_received_ns == 0) unit.first_received_ns = received_ns;
+		unit.last_received_ns = received_ns;
 		return true;
 	}
 

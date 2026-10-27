@@ -14,6 +14,7 @@
 #include <atomic>
 #include <boost/core/noncopyable.hpp>
 #include "../Includes/IParserApi.h"
+#include "../Includes/IBaseDataMgr.h"
 
 NS_WTP_BEGIN
 class WTSVariant;
@@ -42,6 +43,7 @@ public:
 	bool	run();
 
 	const char* id() const { return _id.c_str(); }
+	const ContractSet& subscriptions() const { return _subscriptions; }
 
 public:
 	virtual void handleSymbolList(const WTSArray* aySymbols) override;
@@ -71,6 +73,7 @@ private:
 	ExchgFilter			_filters;
 	WTSVariant*			_cfg;
 	std::string			_id;
+	ContractSet _subscriptions;
 };
 
 typedef std::shared_ptr<ParserAdapter>	ParserAdapterPtr;

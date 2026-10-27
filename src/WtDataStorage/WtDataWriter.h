@@ -296,6 +296,7 @@ private:
 		const std::string& fullcode,
 		DmbBoundary& boundary) const;
 	bool persistPendingRecordingUnits();
+	bool closeRawRecording();
 	void restorePendingRecordingUnits();
 	bool validateSessionDmbBoundaries(
 		const char* sid,
