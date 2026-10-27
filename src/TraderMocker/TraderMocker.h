@@ -39,6 +39,7 @@ public:
 	void controlled_begin_day(PaperAccount::Rules rules, int64_t mark);
 	std::string controlled_snapshot();
 	void controlled_restore(const std::string& state);
+	void controlled_change_contract(const std::string& state, uint32_t day, int64_t settlement);
 	std::string controlled_request(const std::string& request);
 
 private:

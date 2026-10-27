@@ -18,6 +18,7 @@ extern "C"
 	// UTF-8 JSON responses remain valid until the next controlled ABI call on
 	// this thread. Tick/bar pointers are borrowed only for the duration of step.
 	EXPORT_FLAG uint32_t wt_live_abi();
+	EXPORT_FLAG uint32_t wt_live_paper_transition_abi();
 	EXPORT_FLAG const char* wt_live_configure(const char* request);
 	EXPORT_FLAG const char* wt_live_connect();
 	EXPORT_FLAG const char* wt_live_start(const char* request);
