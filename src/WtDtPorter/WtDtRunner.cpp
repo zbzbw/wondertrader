@@ -31,6 +31,7 @@ WtDtRunner::WtDtRunner()
 	, _dumper_for_ordque(NULL)
 	, _dumper_for_orddtl(NULL)
 	, _dumper_for_trans(NULL)
+	, _initialized(false)
 	, _to_exit(false)
 	, _stop_requested(false)
 	, _stop_completed(false)
@@ -46,7 +47,7 @@ void WtDtRunner::start(bool bAsync /* = false */, bool bAlldayMode /* = false */
 {
 	{
 		std::lock_guard<std::mutex> lock(_stop_mtx);
-		if (_stop_requested.load())
+		if (!_initialized || _stop_requested.load())
 			return;
 		_parsers.run();
 	}
@@ -92,7 +93,7 @@ void WtDtRunner::start(bool bAsync /* = false */, bool bAlldayMode /* = false */
 	}
 }
 
-void WtDtRunner::initialize(const char* cfgFile, const char* logCfg, const char* modDir /* = "" */, bool bCfgFile /* = true */, bool bLogCfgFile /* = true */)
+bool WtDtRunner::initialize(const char* cfgFile, const char* logCfg, const char* modDir /* = "" */, bool bCfgFile /* = true */, bool bLogCfgFile /* = true */)
 {
 	WTSLogger::init(logCfg, bLogCfgFile);
 	WtHelper::set_module_dir(modDir);
@@ -106,7 +107,7 @@ void WtDtRunner::initialize(const char* cfgFile, const char* logCfg, const char*
 	if(config == NULL)
 	{
 		WTSLogger::error("Loading config file {} failed", cfgFile);
-		return;
+		return false;
 	}
 
 	//基础数据文件
@@ -179,18 +180,6 @@ void WtDtRunner::initialize(const char* cfgFile, const char* logCfg, const char*
 		}
 	}
 
-	if (config->has("shmcaster"))
-	{
-		_shm_caster.init(config->get("shmcaster"));
-		_data_mgr.add_caster(&_shm_caster);
-	}
-
-	if(config->has("broadcaster"))
-	{
-		_udp_caster.init(config->get("broadcaster"), &_bd_mgr, &_data_mgr);
-		_data_mgr.add_caster(&_udp_caster);
-	}
-
 	//By Wesley @ 2021.12.27
 	//全天候模式，不需要再使用状态机
 	bool bAlldayMode = config->getBoolean("allday");
@@ -203,7 +192,24 @@ void WtDtRunner::initialize(const char* cfgFile, const char* logCfg, const char*
 		WTSLogger::info("datakit will run in allday mode");
 	}
 
-	initDataMgr(config->get("writer"), bAlldayMode);
+	if (!initDataMgr(config->get("writer"), bAlldayMode))
+	{
+		WTSLogger::error("DataKit initialization failed: recording writer is unavailable");
+		config->release();
+		return false;
+	}
+
+	if (config->has("shmcaster"))
+	{
+		_shm_caster.init(config->get("shmcaster"));
+		_data_mgr.add_caster(&_shm_caster);
+	}
+
+	if(config->has("broadcaster"))
+	{
+		_udp_caster.init(config->get("broadcaster"), &_bd_mgr, &_data_mgr);
+		_data_mgr.add_caster(&_udp_caster);
+	}
 
 	if (config->has("index"))
 	{
@@ -259,11 +265,13 @@ void WtDtRunner::initialize(const char* cfgFile, const char* logCfg, const char*
 		WTSLogger::log_raw(LL_WARN, "No parsers config, skipped loading parsers");
 
 	config->release();
+	_initialized = true;
+	return true;
 }
 
-void WtDtRunner::initDataMgr(WTSVariant* config, bool bAlldayMode /* = false */)
+bool WtDtRunner::initDataMgr(WTSVariant* config, bool bAlldayMode /* = false */)
 {
-	_data_mgr.init(config, &_bd_mgr, bAlldayMode ? NULL : &_state_mon);
+	return _data_mgr.init(config, &_bd_mgr, bAlldayMode ? NULL : &_state_mon);
 }
 
 void WtDtRunner::initParsers(WTSVariant* cfg)
@@ -442,6 +450,42 @@ bool WtDtRunner::dumpHisTrans(const char* id, const char* stdCode, uint32_t uDat
 	}
 
 	return _dumper_for_trans(id, stdCode, uDate, items, count);
+}
+
+bool WtDtRunner::recordingControl(uint32_t action, WtRecordingResult& result)
+{
+	std::lock_guard<std::mutex> lock(_stop_mtx);
+	memset(&result, 0, sizeof(result));
+	if (_stop_requested.load()) return false;
+	if (action == 2 && _have_recording_stop)
+	{
+		result = _recording_stop;
+		return !result.failed;
+	}
+	bool success = true;
+	DataWriterStopResult drained;
+	if (action == 1) success = _data_mgr.startRecording();
+	else if (action == 2) success = _data_mgr.stopRecording(drained);
+	else if (action != 0) return false;
+	bool recording, failed;
+	_data_mgr.recordingStatus(recording, failed, result.received_offset,
+		result.accepted_offset, result.persisted_offset, result.segment);
+	result.recording = recording;
+	result.failed = failed;
+	result.writer_drained = action == 2 && drained.writer_drained;
+	result.checkpoint_persisted = action == 2 && drained.checkpoint_persisted;
+	if (action == 0 && !recording && _have_recording_stop)
+	{
+		result.writer_drained = _recording_stop.writer_drained;
+		result.checkpoint_persisted = _recording_stop.checkpoint_persisted;
+	}
+	if (action == 1 && success) _have_recording_stop = false;
+	if (action == 2)
+	{
+		_recording_stop = result;
+		_have_recording_stop = true;
+	}
+	return success;
 }
 
 bool WtDtRunner::requestStop()

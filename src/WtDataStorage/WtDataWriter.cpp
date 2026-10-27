@@ -866,7 +866,6 @@ bool WtDataWriter::procTick(WTSTickData* curTick, uint32_t procFlag)
 		//写到K线缓存
 		pipeToKlines(ct, curTick);
 
-		_sink->broadcastTick(curTick);
 
 		static wt_hashmap<std::string, uint64_t> _tcnt_map;
 		uint64_t& cnt = _tcnt_map[curTick->exchg()];
@@ -2025,104 +2024,8 @@ bool WtDataWriter::updateCache(WTSContractInfo* ct, WTSTickData* curTick, uint32
 
 
 	TickCacheItem& cache = _tick_cache_block->_ticks[idx];
-	if (curTick->tradingdate() < cache._date)
-	{
-		pipe_writer_log(_sink, LL_INFO, "Tradingday[{}] of {} is less than cached tradingday[{}]", curTick->tradingdate(), curTick->code(), cache._date);
-		return false;
-	}
-
-	WTSTickStruct& newTick = curTick->getTickStruct();
-
-	if (curTick->tradingdate() > cache._date)
-	{
-		//新数据交易日大于老数据,则认为是新一天的数据
-		cache._date = curTick->tradingdate();
-		memcpy(&cache._tick, &newTick, sizeof(WTSTickStruct));
-		if (procFlag==1)
-		{
-			cache._tick.volume = cache._tick.total_volume;
-			cache._tick.turn_over = cache._tick.total_turnover;
-			cache._tick.diff_interest = cache._tick.open_interest - cache._tick.pre_interest;
-
-			newTick.volume = newTick.total_volume;
-			newTick.turn_over = newTick.total_turnover;
-			newTick.diff_interest = newTick.open_interest - newTick.pre_interest;
-		}
-
-		/*
-		 *	By Wesley @ 2024.11.19
-		 *	当日新数据进来，都创了新高和新低
-		 *	但是这里也有风险，就是如果接收数据不连续，会造成问题，
-		 *	比如盘中临时接入，会导致第一条K线的最高价和最低价为当日已经出现过的最高价和最低价
-		 */
-		curTick->setLimitFlag(1|2);
-
-		//	newTick.trading_date, curTick->exchg(), curTick->code(), curTick->volume(),
-		//	curTick->turnover(), curTick->openinterest(), curTick->additional());
-		pipe_writer_log(_sink, LL_INFO, "First tick of new tradingday {},{}.{},{},{},{},{},{}", 
-			newTick.trading_date, curTick->exchg(), curTick->code(), curTick->price(), curTick->volume(),
-			curTick->turnover(), curTick->openinterest(), curTick->additional());
-	}
-	else
-	{
-		//如果缓存里的数据日期大于最新行情的日期
-		//或者缓存里的时间大于等于最新行情的时间,数据就不需要处理
-		WTSSessionInfo* sInfo = ct->getCommInfo()->getSessionInfo();
-		uint32_t tdate = sInfo->getOffsetDate(curTick->actiondate(), curTick->actiontime() / 100000);
-		if (tdate > curTick->tradingdate())
-		{
-			pipe_writer_log(_sink, LL_WARN, "Last tick of {}.{} with time {}.{} has an exception, abandoned", curTick->exchg(), curTick->code(), curTick->actiondate(), curTick->actiontime());
-			return false;
-		}
-		else if (curTick->totalvolume() < cache._tick.total_volume)
-		{
-			pipe_writer_log(_sink, LL_WARN, "Last tick of {}.{} with time {}.{}, volume {} is less than cached volume {}, abandoned",
-				curTick->exchg(), curTick->code(), curTick->actiondate(), curTick->actiontime(), curTick->totalvolume(), cache._tick.total_volume);
-			return false;
-		}
-
-		//时间戳相同,但是成交量大于等于原来的,这种情况一般是郑商所,这里的处理方式就是时间戳+200毫秒
-		//By Wesley @ 2021.12.21
-		//今天发现居然一秒出现了4笔，实在是有点无语
-		//只能把500毫秒的变化量改成200，并且改成发生时间小于等于上一笔的判断
-		if(newTick.action_date == cache._tick.action_date && newTick.action_time <= cache._tick.action_time && newTick.total_volume >= cache._tick.total_volume)
-		{
-			/*
-			 *	By Wesley @ 2024.08.29
-			 *	这里对秒数进位做一个规避
-			 */
-			uint32_t left_msecs = (999 - newTick.action_time % 1000) / 50 * 50;
-			newTick.action_time += std::min(left_msecs, (uint32_t)200);
-		}
-
-		/*
-		 *	By Wesley @ 2024.11.19
-		 *	这里增加一个是否是创了新高和新低的判断
-		 */
-		uint32_t lmtFlag = 0;
-		if (decimal::gt(newTick.high, cache._tick.high))
-			lmtFlag |= 1;
-		if (decimal::lt(newTick.low, cache._tick.low))
-			lmtFlag |= 2;
-		curTick->setLimitFlag(lmtFlag);
-
-		//这里就要看需不需要预处理了
-		if(procFlag == 0)
-		{
-			memcpy(&cache._tick, &newTick, sizeof(WTSTickStruct));
-		}
-		else
-		{
-			newTick.volume = newTick.total_volume - cache._tick.total_volume;
-			newTick.turn_over = newTick.total_turnover - cache._tick.total_turnover;
-			newTick.diff_interest = newTick.open_interest - cache._tick.open_interest;
-
-			memcpy(&cache._tick, &newTick, sizeof(WTSTickStruct));
-		}
-
-		//pipe_writer_log(_sink, LL_DEBUG, "Tick cache data updated {}[{}.{}]", newTick.code, newTick.action_date, newTick.action_time);
-	}
-
+	cache._date = curTick->tradingdate();
+	memcpy(&cache._tick, &curTick->getTickStruct(), sizeof(WTSTickStruct));
 	return true;
 }
 
