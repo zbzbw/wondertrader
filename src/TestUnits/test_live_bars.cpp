@@ -182,6 +182,7 @@ TEST(test_live_bars, all_wire_pages_remain_bounded_for_ten_thousand_series)
     req.after = req.through_ns = UINT64_MAX;
     LiveBarPage result;
     result.earliest = result.next = result.processed_through_ns = UINT64_MAX;
+    result.observed_ns = UINT64_MAX;
     result.coverage.add(true, true, 31, UINT64_MAX, UINT64_MAX);
     LiveBarInterval row;
     row.sequence = row.start_ns = row.end_ns = row.event_ns = row.received_ns = UINT64_MAX;

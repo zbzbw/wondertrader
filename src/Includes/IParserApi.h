@@ -75,6 +75,8 @@ public:
 
 public:
 	virtual IBaseDataMgr*	getBaseDataMgr()	= 0;
+
+	virtual void handleSubscription(const char* code, bool accepted) {}
 };
 
 /*

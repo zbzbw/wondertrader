@@ -41,6 +41,10 @@ struct LiveBarInterval : LiveBarWindow
     uint64_t event_ns = 0, received_ns = 0;
     std::optional<wtp::WTSBarStruct> bar;
     LiveBarCoverage coverage;
+    // Retained with this interval, so an older horizon cannot inherit a later
+    // reconnect/disconnect. Not an additional wire record or unlimited log.
+    uint64_t preceding_start_ns = 0;
+    LiveBarCoverage preceding_coverage;
 };
 
 struct LiveBarPage
@@ -49,6 +53,9 @@ struct LiveBarPage
     bool has_more = false, expired = false;
     std::optional<LiveBarInterval> interval;
     LiveBarCoverage coverage;
+    // Latest parser observation is diagnostic, not the historical decision state.
+    bool connected = false, subscribed = false, session_closed = false;
+    uint64_t observed_ns = 0;
 };
 
 class LiveBarSeries
@@ -71,6 +78,8 @@ public:
     std::optional<LiveBarInterval> current() const;
     uint64_t processedThrough() const { return _processed; }
     size_t retained() const { return _history.size(); }
+    bool drained() const { return _close_index == _windows.size(); }
+    uint64_t calendarEnd() const { return _windows.empty() ? 0 : _windows.back().end_ns; }
 
 private:
     LiveBarInterval& pending(size_t index);
@@ -80,8 +89,8 @@ private:
     WTSDataFactory _factory;
     size_t _history_count, _close_index = 0;
     uint64_t _delay, _processed = 0, _sequence = 0, _joined = 0;
+    uint64_t _previous_calendar_end = 0;
     std::vector<LiveBarWindow> _windows;
     std::map<size_t, LiveBarInterval> _pending;
     std::deque<LiveBarInterval> _history;
-    LiveBarCoverage _status;
 };

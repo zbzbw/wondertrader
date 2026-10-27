@@ -12,6 +12,7 @@
 #include "UDPCaster.h"
 #include "WtHelper.h"
 #include "IDataCaster.h"
+#include "LiveBarCalendar.h"
 
 #include "../Includes/WTSVariant.hpp"
 #include "../Share/DLLHelper.hpp"
@@ -58,6 +59,10 @@ bool DataManager::isSessionProceeded(const char* sid)
 
 bool DataManager::init(WTSVariant* params, WTSBaseDataMgr* bdMgr, StateMonitor* stMonitor)
 {
+	_bd_mgr = bdMgr;
+	_state_mon = stMonitor;
+	_last_drain.writer_drained = _last_drain.checkpoint_persisted = true;
+	if (!params) return true;
 	_writer_params = params;
 	params->retain();
 	_base_path = StrUtil::standardisePath(params->getCString("path"));
@@ -70,10 +75,33 @@ bool DataManager::init(WTSVariant* params, WTSBaseDataMgr* bdMgr, StateMonitor* 
 		} while (boost::filesystem::exists(next_path));
 		params->append("path", next_path.c_str());
 	}
-	_bd_mgr = bdMgr;
-	_state_mon = stMonitor;
+	if (params->has("enabled") && !params->getBoolean("enabled")) return true;
+	if (!loadWriter()) return false;
+	_writer_ready = _writer->init(params, this);
+	_recording = _writer_ready;
+	_recording_failed = !_writer_ready;
+	if (_writer_ready)
+	{
+		// Retain the existing restart baseline without relying on future disk writes.
+		WTSArray* contracts = _bd_mgr->getContracts();
+		for (auto it = contracts->begin(); it != contracts->end(); ++it)
+		{
+			WTSContractInfo* contract = static_cast<WTSContractInfo*>(*it);
+			WTSTickData* cached = _writer->getCurTick(contract->getCode(), contract->getExchg());
+			if (cached)
+			{
+				_latest_ticks[contract->getFullCode()] = cached->getTickStruct();
+				cached->release();
+			}
+		}
+		contracts->release();
+	}
+	return _writer_ready;
+}
 
-	std::string module = params->getCString("module");
+bool DataManager::loadWriter()
+{
+	std::string module = _writer_params->getCString("module");
 	if (module.empty())
 		module = WtHelper::get_module_dir() + DLLHelper::wrap_module("WtDataStorage");
 	else
@@ -112,34 +140,14 @@ bool DataManager::init(WTSVariant* params, WTSBaseDataMgr* bdMgr, StateMonitor* 
 		return false;
 	uint64_t accepted, persisted;
 	bool failed;
-	if (!_writer->recordingOffsets(accepted, persisted, failed))
-	{
-		WTSLogger::error("Data writer {} does not support independent recording controls; use WtDataStorage", module);
+	if (!_writer->recordingOffsets(accepted, persisted, failed)) {
+		WTSLogger::error("Data writer does not support independent recording controls; use WtDataStorage");
 		_recording_failed = true;
 		_remover(_writer);
 		_writer = NULL;
 		return false;
 	}
-	_writer_ready = _writer->init(params, this);
-	_recording = _writer_ready;
-	_recording_failed = !_writer_ready;
-	if (_writer_ready)
-	{
-		// Retain the existing restart baseline without relying on future disk writes.
-		WTSArray* contracts = _bd_mgr->getContracts();
-		for (auto it = contracts->begin(); it != contracts->end(); ++it)
-		{
-			WTSContractInfo* contract = static_cast<WTSContractInfo*>(*it);
-			WTSTickData* cached = _writer->getCurTick(contract->getCode(), contract->getExchg());
-			if (cached)
-			{
-				_latest_ticks[contract->getFullCode()] = cached->getTickStruct();
-				cached->release();
-			}
-		}
-		contracts->release();
-	}
-	return _writer_ready;
+	return true;
 }
 
 void DataManager::add_ext_dumper(const char* id, IHisDataDumper* dumper)
@@ -212,7 +220,9 @@ bool DataManager::startRecording()
 {
 	std::lock_guard<std::mutex> lock(_writer_mtx);
 	if (_recording) return true;
-	if (_recording_failed || !_creator) return false;
+	if (_recording_failed || !_writer_params) return false;
+	if (!_creator && !loadWriter()) return false;
+	// loadWriter creates the first writer; subsequent starts create a new one.
 	// A new directory keeps the deliberate recording gap out of old bars/files.
 	std::string segment_path;
 	do {
@@ -220,7 +230,7 @@ bool DataManager::startRecording()
 		segment_path = _base_path + "segments/" + std::to_string(_segment) + "/";
 	} while (boost::filesystem::exists(segment_path));
 	_writer_params->append("path", segment_path.c_str());
-	_writer = _creator();
+	if (!_writer) _writer = _creator();
 	_writer_ready = _writer->init(_writer_params, this);
 	for (const auto& dumper : _ext_dumpers)
 		_writer->add_ext_dumper(dumper.first.c_str(), dumper.second);
@@ -243,9 +253,10 @@ void DataManager::recordingStatus(bool& recording, bool& failed, uint64_t& recei
 	segment = _segment;
 }
 
-bool DataManager::writeTick(WTSTickData* curTick, uint32_t procFlag)
+bool DataManager::writeTick(WTSTickData* curTick, uint32_t procFlag, uint64_t received_ns)
 {
-	if (curTick == NULL || !updateLatest(curTick, procFlag)) return false;
+	if (!received_ns) received_ns = LiveBarCalendar::now();
+	if (curTick == NULL || !updateLatest(curTick, procFlag, received_ns)) return false;
 	uint64_t received = _received.fetch_add(1) + 1;
 	broadcastTick(curTick);
 	uint64_t now = static_cast<uint64_t>(std::time(NULL));
@@ -299,86 +310,65 @@ WTSTickData* DataManager::getCurTick(const char* code, const char* exchg)
 	return found == _latest_ticks.end() ? NULL : WTSTickData::create(found->second);
 }
 
-bool DataManager::updateLatest(WTSTickData* curTick, uint32_t procFlag)
+bool DataManager::updateLatest(WTSTickData* curTick, uint32_t procFlag, uint64_t received)
 {
-	WTSContractInfo* ct = curTick->getContractInfo();
-	if (ct == NULL || !canSessionReceive(ct->getCommInfo()->getSession()))
+	auto ct = curTick->getContractInfo();
+	if (!ct) return false;
+	uint64_t event = 0;
+	try { event = LiveBarCalendar::timestamp(curTick->actiondate(), curTick->actiontime()); }
+	catch (const std::invalid_argument&) {
+		rejectTick(curTick->code(), curTick->exchg(), received);
 		return false;
+	}
 	std::lock_guard<std::mutex> lock(_latest_mtx);
-	WTSTickStruct& cache = _latest_ticks[ct->getFullCode()];
-	if (curTick->tradingdate() < cache.trading_date)
-	{
-		WTSLogger::info("Tradingday[{}] of {} is less than cached tradingday[{}]", curTick->tradingdate(), curTick->code(), cache.trading_date);
+	const std::string code = ct->getFullCode();
+	if (!canSessionReceive(ct->getCommInfo()->getSession())) {
+		markRejected(code, BarRejected, received);
 		return false;
 	}
-
-	WTSTickStruct& newTick = curTick->getTickStruct();
-
-	if (curTick->tradingdate() > cache.trading_date)
-	{
-		cache.trading_date = curTick->tradingdate();
-		memcpy(&cache, &newTick, sizeof(WTSTickStruct));
-		if (procFlag==1)
-		{
-			cache.volume = cache.total_volume;
-			cache.turn_over = cache.total_turnover;
-			cache.diff_interest = cache.open_interest - cache.pre_interest;
-
-			newTick.volume = newTick.total_volume;
-			newTick.turn_over = newTick.total_turnover;
-			newTick.diff_interest = newTick.open_interest - newTick.pre_interest;
-		}
-
-
-		curTick->setLimitFlag(1|2);
-		WTSLogger::info("First tick of new tradingday {},{}.{},{},{},{},{},{}",
-			newTick.trading_date, curTick->exchg(), curTick->code(), curTick->price(), curTick->volume(),
-			curTick->turnover(), curTick->openinterest(), curTick->additional());
+	auto& cache = _latest_ticks[code];
+	auto session = ct->getCommInfo()->getSessionInfo();
+	if (!curTick->tradingdate() || curTick->tradingdate() < cache.trading_date ||
+		!session || session->getOffsetDate(curTick->actiondate(), curTick->actiontime() / 100000) > curTick->tradingdate()) {
+		markRejected(code, BarRejected, received);
+		return false;
 	}
-	else
-	{
-		WTSSessionInfo* sInfo = ct->getCommInfo()->getSessionInfo();
-		uint32_t tdate = sInfo->getOffsetDate(curTick->actiondate(), curTick->actiontime() / 100000);
-		if (tdate > curTick->tradingdate())
-		{
-			WTSLogger::warn("Last tick of {}.{} with time {}.{} has an exception, abandoned", curTick->exchg(), curTick->code(), curTick->actiondate(), curTick->actiontime());
-			return false;
-		}
-		else if (curTick->totalvolume() < cache.total_volume)
-		{
-			WTSLogger::warn("Last tick of {}.{} with time {}.{}, volume {} is less than cached volume {}, abandoned",
-				curTick->exchg(), curTick->code(), curTick->actiondate(), curTick->actiontime(), curTick->totalvolume(), cache.total_volume);
-			return false;
-		}
-		if(newTick.action_date == cache.action_date && newTick.action_time <= cache.action_time && newTick.total_volume >= cache.total_volume)
-		{
-
-			// Preserve the existing subsecond adjustment for equal source timestamps.
-			uint32_t left_msecs = (999 - newTick.action_time % 1000) / 50 * 50;
-			newTick.action_time += std::min(left_msecs, (uint32_t)200);
-		}
-
-
-		uint32_t lmtFlag = 0;
-		if (decimal::gt(newTick.high, cache.high))
-			lmtFlag |= 1;
-		if (decimal::lt(newTick.low, cache.low))
-			lmtFlag |= 2;
-		curTick->setLimitFlag(lmtFlag);
-		if(procFlag == 0)
-		{
-			memcpy(&cache, &newTick, sizeof(WTSTickStruct));
-		}
-		else
-		{
-			newTick.volume = newTick.total_volume - cache.total_volume;
-			newTick.turn_over = newTick.total_turnover - cache.total_turnover;
-			newTick.diff_interest = newTick.open_interest - cache.open_interest;
-
-			memcpy(&cache, &newTick, sizeof(WTSTickStruct));
+	WTSTickStruct normalized{};
+	auto result = _tick_states[code].normalize(curTick->getTickStruct(), event, normalized, procFlag != 0);
+	if (result == LiveTickState::Duplicate) return false;
+	if (result == LiveTickState::Invalid || result == LiveTickState::Late || result == LiveTickState::CumulativeReset) {
+		markRejected(code, result == LiveTickState::CumulativeReset ? BarCumulativeReset : BarRejected, received);
+		return false;
+	}
+	uint32_t flags = 0;
+	if (!cache.trading_date || normalized.trading_date != cache.trading_date) flags = 3;
+	else {
+		if (decimal::gt(normalized.high, cache.high)) flags |= 1;
+		if (decimal::lt(normalized.low, cache.low)) flags |= 2;
+	}
+	curTick->setLimitFlag(flags);
+	curTick->getTickStruct() = cache = normalized;
+	auto found = _bar_inputs.find(code);
+	if (found != _bar_inputs.end()) {
+		auto& input = found->second;
+		// An observed Tick confirms this instrument even for extended parsers
+		// without a subscription-ack callback. Silence never confirms it.
+		markInput(input, received);
+		input.connected = input.subscribed = true;
+		input.status_since = received;
+		auto release = [](WTSTickData* value) { value->release(); };
+		std::unique_ptr<WTSTickData, decltype(release)> barTick(WTSTickData::create(normalized), release);
+		barTick->setCode(_bar_names[input.series.front()].first.c_str());
+		barTick->setContractInfo(ct);
+		for (auto index : input.series) {
+			auto& entry = _bar_series[index];
+			advanceSeries(entry, received);
+			if (result == LiveTickState::Baseline)
+				entry.value->mark(true, false, BarJoined, event, event);
+			if (!entry.value->tick(barTick.get(), event, received))
+				entry.value->mark(false, true, BarRejected, received, received);
 		}
 	}
-
 	return true;
 }
 

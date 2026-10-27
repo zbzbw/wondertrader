@@ -153,6 +153,8 @@ inline std::string page(const Request& req, const std::string& stream, const Liv
     ns(w, "processed_through_ns", page.processed_through_ns);
     w.Key("has_more"); w.Bool(page.has_more);
     w.Key("coverage"); coverage(w, page.coverage);
+    w.Key("input"); w.StartArray(); w.Bool(page.connected); w.Bool(page.subscribed);
+    w.Bool(page.session_closed); w.String(std::to_string(page.observed_ns).c_str()); w.EndArray();
     w.Key("interval"); interval(w, page.interval);
     w.EndObject(); return packet(Read, json);
 }
@@ -162,27 +164,35 @@ inline std::string error(const Request& req, const std::string& stream, const ch
     rapidjson::StringBuffer json; Writer w(json); head(w, req, stream, code);
     w.EndObject(); return packet(req.type, json);
 }
+inline std::string enumeratePage(const Request& req, const std::string& stream,
+    const std::vector<std::pair<std::string, std::string>>& series, uint64_t total)
+{
+    rapidjson::StringBuffer json; Writer w(json); head(w, req, stream, "ok");
+    auto end = req.index + series.size();
+    ns(w, "index", req.index); ns(w, "next", end);
+    w.Key("has_more"); w.Bool(end < total);
+    w.Key("items"); w.StartArray();
+    for (const auto& item : series) {
+        w.StartArray(); w.String(item.first.c_str()); w.String(item.second.c_str()); w.EndArray();
+    }
+    w.EndArray(); w.EndObject(); return packet(Enumerate, json);
+}
 inline std::string enumerate(const Request& req, const std::string& stream,
     const std::vector<std::pair<std::string, std::string>>& series)
 {
     if (req.index > series.size()) return error(req, stream, "index_invalid");
-    rapidjson::StringBuffer json; Writer w(json); head(w, req, stream, "ok");
-    auto end = std::min<uint64_t>(series.size(), req.index + 8);
-    ns(w, "index", req.index); ns(w, "next", end);
-    w.Key("has_more"); w.Bool(end < series.size());
-    w.Key("items"); w.StartArray();
-    for (auto i = req.index; i < end; ++i) {
-        w.StartArray(); w.String(series[i].first.c_str()); w.String(series[i].second.c_str()); w.EndArray();
-    }
-    w.EndArray(); w.EndObject(); return packet(Enumerate, json);
+    const auto end = std::min<uint64_t>(series.size(), req.index + 8);
+    return enumeratePage(req, stream, {series.begin() + req.index, series.begin() + end}, series.size());
 }
 inline std::string current(const Request& req, const std::string& stream,
-    const std::optional<LiveBarInterval>& value, uint64_t processed)
+    const std::optional<LiveBarInterval>& value, uint64_t processed, const LiveBarPage& state = LiveBarPage{})
 {
     rapidjson::StringBuffer json; Writer w(json); head(w, req, stream, "ok");
     w.Key("instrument_id"); w.String(req.code.c_str());
     w.Key("frequency"); w.String(req.frequency.c_str());
     ns(w, "processed_through_ns", processed);
+    w.Key("input"); w.StartArray(); w.Bool(state.connected); w.Bool(state.subscribed);
+    w.Bool(state.session_closed); w.String(std::to_string(state.observed_ns).c_str()); w.EndArray();
     w.Key("interval"); interval(w, value); w.EndObject(); return packet(Current, json);
 }
 }

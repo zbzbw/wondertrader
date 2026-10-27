@@ -54,6 +54,7 @@ void LiveBarSeries::setWindows(std::vector<LiveBarWindow> windows, uint64_t join
     if (_close_index != _windows.size() || !_pending.empty())
         throw std::logic_error("previous live bar calendar is not drained");
     uint64_t previous = _windows.empty() ? 0 : _windows.back().end_ns;
+    _previous_calendar_end = previous;
     for (const auto& window : windows) {
         if (window.start_ns < previous || window.end_ns <= window.start_ns)
             throw std::invalid_argument("live bar windows must be ordered and disjoint");
@@ -74,6 +75,8 @@ LiveBarInterval& LiveBarSeries::pending(size_t index)
     if (found != _pending.end()) return found->second;
     LiveBarInterval value;
     static_cast<LiveBarWindow&>(value) = _windows.at(index);
+    value.preceding_start_ns = index ? _windows[index - 1].end_ns :
+        (_previous_calendar_end ? _previous_calendar_end : std::min(_joined, value.start_ns));
     return _pending.emplace(index, value).first->second;
 }
 
@@ -114,9 +117,14 @@ bool LiveBarSeries::tick(wtp::WTSTickData* tick, uint64_t event, uint64_t receiv
 void LiveBarSeries::mark(bool partial, bool gap, uint32_t reason, uint64_t first, uint64_t last)
 {
     if (last < first) throw std::invalid_argument("reversed live bar coverage range");
-    _status.add(partial, gap, reason, first, last);
     for (size_t i = _close_index; i < _windows.size(); ++i) {
         const auto& w = _windows[i];
+        const auto preceding = i ? _windows[i - 1].end_ns :
+            (_previous_calendar_end ? _previous_calendar_end : std::min(_joined, w.start_ns));
+        if (preceding > last) break;
+        if (first < w.start_ns && last >= preceding)
+            pending(i).preceding_coverage.add(partial, gap, reason,
+                std::max(first, preceding), std::min(last, w.start_ns));
         if (w.start_ns > last) break;
         if (w.end_ns > first)
             pending(i).coverage.add(partial, gap, reason,
@@ -157,18 +165,19 @@ LiveBarPage LiveBarSeries::read(uint64_t after, uint64_t through) const
         page.interval = interval;
         page.next = interval.sequence;
     }
-    // Include current known coverage even when this frequency has no close at T.
-    for (const auto& item : _pending) {
-        const auto& value = item.second;
-        if (value.start_ns >= through) break;
-        const auto c = value.coverage.until(through);
-        if (c.reasons && c.first_ns <= through)
-            page.coverage.add(c.partial, c.gap, c.reasons, c.first_ns, std::min(c.last_ns, through));
-    }
-    if (_status.reasons && _status.first_ns <= through && _status.last_ns >= through) {
-        const auto status = _status.until(through);
-        if (status.reasons) page.coverage.add(status.partial, status.gap, status.reasons, status.first_ns, status.last_ns);
-    }
+    // State at T belongs to the same bounded interval history as OHLC. This
+    // also covers a lower frequency whose bar has not closed yet, and a rest
+    // period before the next interval. Later gaps never contaminate an old T.
+    auto at = [&](const LiveBarInterval& value) {
+        if (value.start_ns < through && through <= value.end_ns)
+            page.coverage = value.coverage.until(through);
+        else if (value.preceding_start_ns <= through && through < value.start_ns)
+            page.coverage = value.preceding_coverage.until(through);
+        else return false;
+        return true;
+    };
+    for (const auto& value : _history) if (at(value)) return page;
+    for (const auto& item : _pending) if (at(item.second)) return page;
     return page;
 }
 
