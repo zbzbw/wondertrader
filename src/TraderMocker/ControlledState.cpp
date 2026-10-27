@@ -77,6 +77,29 @@ std::string TraderMocker::controlled_snapshot()
     return std::string(buffer.GetString(), buffer.GetSize());
 }
 
+void TraderMocker::controlled_change_contract(const std::string& state, uint32_t day, int64_t settlement)
+{
+    controlled_owner();
+    require(_bd_mgr && !_controlled_connected && !_draining && !_orders && !_trades && _input_seq == 0,
+            "Contract change requires a fresh disconnected controlled trader");
+    rapidjson::Document doc, target;
+    doc.Parse(state.data(), state.size());
+    require(!doc.HasParseError() && doc.IsObject() && number(doc, "version") == 1,
+            "Invalid source controlled state");
+    auto account = std::make_unique<PaperAccount>(PaperAccount::restore(text(doc, "account")));
+    require(account->lots().empty(), "Contract change requires zero positions");
+    for (const auto& entry : account->orders())
+        require(entry.second.status != "open", "Contract change requires terminal orders");
+    const auto targetState = _paper->snapshot();
+    target.Parse(targetState.data(), targetState.size());
+    const auto mark = PaperAccount::scaled_decimal(text(target, "mark"), 0);
+    account->settle(day, settlement);
+    account->change_contract(_paper->rules(), mark);
+    // Only accounting crosses the stopped cut. Orders, trades and CTA history
+    // remain in the source checkpoint; this target keeps its fresh counters.
+    _paper = std::move(account);
+}
+
 void TraderMocker::controlled_restore(const std::string& state)
 {
     controlled_owner();

@@ -303,6 +303,22 @@ void PaperAccount::begin_day(Rules rules, int64_t price)
     *this = std::move(next);
 }
 
+void PaperAccount::change_contract(Rules rules, int64_t price)
+{
+    validate(rules);
+    require(settled() && _lots.empty() && rules.trading_day > _rules.trading_day
+            && rules.contract != _rules.contract, "Contract change requires a settled flat prior account");
+    for (const auto& entry : _orders)
+        require(entry.second.status != "open", "Contract change requires terminal orders");
+    auto next = *this;
+    next._pre_balance = next._cash; next._deposit = 0;
+    next._fees_at_day_start = next._fees; next._realized_at_day_start = next._realized;
+    next._rules = std::move(rules); next._prior_contract_fees = next._fees; next._orders.clear();
+    next._settled_day = 0; next._settlement_price = 0;
+    next.mark(price);
+    *this = std::move(next);
+}
+
 std::string PaperAccount::snapshot() const
 {
     rapidjson::StringBuffer buffer;
@@ -324,6 +340,7 @@ std::string PaperAccount::snapshot() const
     }
     out.EndArray(); out.EndObject();
     number("cash", _cash); number("mark", _mark); number("fees", _fees); number("realized", _realized);
+    if (_prior_contract_fees) number("prior_contract_fees", _prior_contract_fees);
     number("pre_balance", _pre_balance); number("deposit", _deposit);
     number("fees_at_day_start", _fees_at_day_start); number("realized_at_day_start", _realized_at_day_start);
     number("settled_day", _settled_day); number("settlement_price", _settlement_price);
@@ -413,7 +430,10 @@ PaperAccount PaperAccount::restore(const std::string& state)
     }
     const auto& orders = field(doc, "orders");
     require(orders.IsArray(), "Paper order array required");
-    Integer totalFees = 0;
+    account._prior_contract_fees = doc.HasMember("prior_contract_fees") ? number(doc, "prior_contract_fees") : 0;
+    require(account._prior_contract_fees >= 0 && account._prior_contract_fees <= account._fees_at_day_start,
+            "Invalid carried contract fees");
+    Integer totalFees = account._prior_contract_fees;
     for (const auto& value : orders.GetArray())
     {
         auto offset = number(value, "offset");

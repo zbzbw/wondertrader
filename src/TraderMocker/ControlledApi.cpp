@@ -30,6 +30,9 @@ std::string TraderMocker::controlled_request(const std::string& request)
     require(!doc.HasParseError() && doc.IsObject());
     auto operation = text(doc, "op");
     if (operation == "restore") controlled_restore(text(doc, "state"));
+    else if (operation == "change_contract")
+        controlled_change_contract(text(doc, "state"), small(doc, "trading_day"),
+                                   PaperAccount::scaled_decimal(text(doc, "price"), 6));
     else if (operation == "expire_day") controlled_expire_day(small(doc, "trading_day"));
     else if (operation == "settle")
         controlled_settle(small(doc, "trading_day"), PaperAccount::scaled_decimal(text(doc, "price"), 6));

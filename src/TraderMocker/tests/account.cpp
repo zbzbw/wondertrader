@@ -82,6 +82,35 @@ void lifecycle() {
     check(a.snapshot() == before);
     rejects([&] { a.reserve("close-short", true, PaperAccount::Yesterday, 2, price(110)); });
 }
+void contract_change() {
+    auto r = rules(), next = r;
+    next.contract = "TEST.test2"; next.trading_day++;
+    PaperAccount a(r, 1000000, price(100));
+    a.reserve("entry", false, PaperAccount::Open, 1, price(100));
+    rejects([&] { a.change_contract(next, price(105)); });
+    a.fill("entry", 1, price(100));
+    auto held = a;
+    held.settle(r.trading_day, price(101));
+    rejects([&] { held.change_contract(next, price(105)); });
+    a.reserve("exit", false, PaperAccount::Today, 1, price(102));
+    a.fill("exit", 1, price(102));
+    a.settle(r.trading_day, price(102));
+    auto before = a.snapshot();
+    auto money = a.balance();
+    auto invalid = next; invalid.trading_day = r.trading_day;
+    rejects([&] { a.change_contract(invalid, price(105)); });
+    rejects([&] { a.change_contract(r, price(105)); });
+    rejects([&] { a.change_contract(next, price(200)); });
+    check(a.snapshot() == before);
+    a.change_contract(next, price(105));
+    auto moved = a.balance();
+    check(moved.cash == money.cash && moved.equity == money.cash && moved.available == money.cash);
+    check(moved.fees == money.fees && moved.realized == money.realized && moved.fees > 0 && moved.realized > 0);
+    check(moved.pre_balance == money.cash && moved.deposit == 0 && moved.day_fees == 0 && moved.day_realized == 0);
+    check(a.rules().contract == next.contract && a.orders().empty() && a.lots().empty() && !a.settled());
+    check(PaperAccount::restore(a.snapshot()).snapshot() == a.snapshot());
+}
+
 void precision() {
     check(PaperAccount::scaled_decimal("123.45", 2) == 12345);
     check(PaperAccount::decimal_string(-1, 2) == "-0.01");
@@ -108,6 +137,6 @@ void precision() {
 }
 }
 int main() {
-    try { lifecycle(); precision(); std::cout << "Paper account lifecycle and precision passed\n"; }
+    try { lifecycle(); precision(); contract_change(); std::cout << "Paper account lifecycle, precision and contract change passed\n"; }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

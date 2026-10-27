@@ -82,6 +82,21 @@ public:
         this->trader->configureLive(run, generation, contract->getFullCode(), [this](CommonExecuter action) {
             std::lock_guard<std::mutex> lock{this->callback_mutex}; this->callbacks.push_back(std::move(action));
         });
+        if (request.HasMember("paper_transition")) {
+            if (mode != "paper") throw std::invalid_argument("Contract change is paper only");
+            const auto& transition = field(request, "paper_transition");
+            const auto& source = field(transition, "source");
+            if (text(source, "mode") != "paper" || text(source, "instrument_id") == code
+                || !field(source, "stopping").IsBool() || !source["stopping"].GetBool())
+                throw std::invalid_argument("Contract change requires a stopped different paper contract");
+            const auto& settlement = field(transition, "settlement");
+            rapidjson::StringBuffer b; Writer w(b);
+            w.StartObject(); w.Key("op"); w.String("change_contract");
+            w.Key("state"); w.String(text(source, "paper").c_str());
+            w.Key("trading_day"); w.Uint(readUint32(settlement, "trading_day"));
+            w.Key("price"); w.String(text(settlement, "price").c_str()); w.EndObject();
+            paper = paperResult(this->trader->paperControl(b.GetString()));
+        }
         this->trader->stampLiveInput(0, event_ms, received_at, initialDay);
         engine.controlledDecisions(false);
     }

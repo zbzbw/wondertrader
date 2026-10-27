@@ -54,6 +54,7 @@ public:
     void settle(uint32_t day, int64_t official_price);
     void expire_day(uint32_t day);
     void begin_day(Rules rules, int64_t mark);
+    void change_contract(Rules rules, int64_t mark);
     Balance balance() const;
     PositionAmounts position_amounts(bool short_side, Offset bucket = Open) const;
     int64_t position(bool short_side, Offset bucket, bool available) const;
@@ -72,6 +73,7 @@ private:
     PaperAccount() = default;
     Rules _rules;
     int64_t _cash = 0, _mark = 0, _fees = 0, _realized = 0;
+    int64_t _prior_contract_fees = 0;
     int64_t _pre_balance = 0, _deposit = 0, _fees_at_day_start = 0, _realized_at_day_start = 0;
     uint32_t _settled_day = 0;
     int64_t _settlement_price = 0;
