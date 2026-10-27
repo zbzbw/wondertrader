@@ -150,6 +150,12 @@ public:
                 const auto& refresh = field(d, "refresh");
                 if (!refresh.IsBool()) throw std::invalid_argument("Query refresh must be a boolean");
                 if (refresh.GetBool() && trader->queryLiveFacts() < 0) throw std::runtime_error("Native reconciliation query was rejected");
+                if (d.HasMember("bar_after_ns")) {
+                    auto after = text(d,"bar_after_ns");
+                    if (after.empty() || after.size()>20 || after.find_first_not_of("0123456789")!=std::string::npos)
+                        throw std::invalid_argument("Invalid shared bar calendar cursor");
+                    result = "\"" + std::to_string(shared_bars.nextClose(engine,readUint32(d,"trading_day"),std::stoull(after))) + "\"";
+                }
             } else if (operation == "ack") {
                 trader->acknowledgeLiveReports(integer(d, "sequence"));
             } else if (operation == "restore") {
@@ -357,12 +363,19 @@ private:
         if ((version != 1 && version != 2) || text(d, "mode") != mode || text(d, "instrument_id") != code)
             throw std::invalid_argument("Joint native checkpoint identity mismatch");
         auto restoredSequence = integer(d, "sequence"), restoredTime = integer(d, "event_ms");
-        if (version == 1 && shared_bars.enabled()) throw std::invalid_argument("Legacy checkpoint has no shared bar inputs");
+        const bool beginShared = shared_bars.enabled() && (version == 1 || field(d,"shared_bars").IsNull());
+        if (beginShared) {
+            auto savedEngine = parse(text(d,"engine"));
+            auto savedClock = parse(text(savedEngine,"clock"));
+            if (mode != "paper" || !field(savedClock,"ended").IsBool() || !field(savedClock,"ended").GetBool()
+                || !field(d,"active_bar").IsNull() || readUint32(d,"bar_phase"))
+                throw std::invalid_argument("Shared input transition requires a completed historical paper day");
+        }
         paper_sequence = version == 1 ? restoredSequence : integer(d,"paper_sequence");
         if (paper_sequence > restoredSequence) throw std::invalid_argument("Paper cursor exceeds owner cursor");
         if (version == 2) {
             const auto& shared = field(d,"shared_bars");
-            if (shared.IsNull() == shared_bars.enabled()) throw std::invalid_argument("Shared bar checkpoint mode changed");
+            if (!shared.IsNull() && !shared_bars.enabled()) throw std::invalid_argument("Shared bar checkpoint mode changed");
             if (!shared.IsNull()) shared_bars.restore(shared);
             const auto source=text(d,"source_ns");
             if (source.empty() || source.size()>20 || source.find_first_not_of("0123456789")!=std::string::npos)
@@ -393,6 +406,7 @@ private:
             paper = paperResult(trader->paperControl(b.GetString()));
         }
         trader->restoreLive(text(d, "trader")); engine.restoreLive(text(d, "engine"));
+        if (beginShared) data.controlledBeginShared();
         trader->stampLiveInput(restoredSequence, restoredTime, received, engine.getTradingDate());
         sequence = restoredSequence; event_ms = restoredTime; received_at = std::move(received);
         bar_input = std::move(restoredBar); bar_phase = restoredPhase;

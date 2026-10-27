@@ -138,6 +138,16 @@ void WtDtMgr::controlledVisibility(uint64_t through_ns) {
     _controlled_shared_bars = true; _controlled_visible_ns = through_ns;
 }
 
+void WtDtMgr::controlledBeginShared() {
+    if (!_engine->controlled() || _controlled_shared_bars)
+        throw std::logic_error("Shared cache transition requires historical controlled input");
+    // The completed historical account/strategy state is retained. Its local
+    // m5 cache cannot establish any cursor or coverage in the shared stream.
+    if (_bars_cache) _bars_cache->clear();
+    _controlled_bar_ends.clear(); _bar_notifies.clear();
+    _controlled_visible_ns = 0; _controlled_shared_bars = true;
+}
+
 void WtDtMgr::controlledNotify(const char* stdCode, WTSKlinePeriod period, uint32_t times, uint64_t end_ns) {
     auto key = barKey(stdCode, period, times);
     if (end_ns > _controlled_visible_ns) throw std::logic_error("Controlled bar is not visible yet");

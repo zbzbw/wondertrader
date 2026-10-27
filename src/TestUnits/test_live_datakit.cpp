@@ -84,6 +84,11 @@ bool tick(DataManager& data, Base& base, uint32_t time, double total, uint64_t r
 
 TEST(test_live_datakit, recording_filter_stop_and_restart_leave_shared_bars_running)
 {
+#ifdef _WIN32
+    _putenv_s("BWT_DATAKIT_RUN_ID", "shared-bars-recording-test");
+#else
+    setenv("BWT_DATAKIT_RUN_ID", "shared-bars-recording-test", 1);
+#endif
     const auto dll = std::getenv("BWT_TEST_WRITER_DLL");
     ASSERT_NE(dll, nullptr);
     const std::string previous = WtHelper::get_module_dir();
@@ -297,10 +302,35 @@ TEST(test_live_datakit, real_udp_dispatch_and_timer_advance_without_consumers)
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     EXPECT_GT(count, 4u); EXPECT_LE(count, 1200u);
+    // A second independent reader receives the same page. Closing the first
+    // reader has no effect on the shared timer or the remaining reader.
+    udp::socket second(io, udp::endpoint(udp::v4(), 0));
+    second.non_blocking(true);
+    second.send_to(boost::asio::buffer(packet), peer);
+    char other[1201]; size_t otherCount = 0;
+    const auto secondDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (std::chrono::steady_clock::now() < secondDeadline) {
+        boost::system::error_code error;
+        otherCount = second.receive_from(boost::asio::buffer(other), sender, 0, error);
+        if (!error) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_EQ(std::string(buffer, count), std::string(other, otherCount));
+    client.close();
     // Allow one timer period, then inspect the shared state; no owner poll runs.
     std::this_thread::sleep_for(std::chrono::milliseconds(150));
     auto state = page(data, stream(data), "1h", 0, now());
     EXPECT_GT(LiveBarWire::number(state["processed_through_ns"]), joined);
+    second.send_to(boost::asio::buffer(packet), peer);
+    otherCount = 0;
+    const auto remainingDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (std::chrono::steady_clock::now() < remainingDeadline) {
+        boost::system::error_code error;
+        otherCount = second.receive_from(boost::asio::buffer(other), sender, 0, error);
+        if (!error) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    EXPECT_EQ(std::string(buffer, count), std::string(other, otherCount));
     caster.stop();
 }
 

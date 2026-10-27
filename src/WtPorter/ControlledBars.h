@@ -25,6 +25,8 @@ class ControlledBars {
     uint32_t history = 120;
     size_t next = 0;
     bool unavailable = false;
+    uint32_t calendar_day = 0;
+    std::vector<uint64_t> closes;
 
     static const V& field(const V& v, const char* key) {
         if (!v.IsObject() || !v.HasMember(key)) throw std::invalid_argument("Missing shared bar field");
@@ -60,6 +62,25 @@ class ControlledBars {
 public:
     bool enabled() const { return !positions.empty(); }
     uint64_t completedThrough() const { return completed; }
+    uint64_t nextClose(WtCtaEngine& engine, uint32_t day, uint64_t after) {
+        if (!enabled()) throw std::invalid_argument("Shared bar inputs are not configured");
+        if (calendar_day != day) {
+            std::set<uint64_t> unique;
+            auto& base = *static_cast<WTSBaseDataMgr*>(engine.get_basedata_mgr());
+            // Physical contracts of a product share its session and holiday calendar.
+            std::set<std::pair<std::string,uint32_t>> sessions;
+            for (const auto& row : positions) {
+                auto contract = engine.get_contract_info(row.first.first.c_str());
+                auto period = minutes(row.first.second);
+                if (!sessions.emplace(contract->getCommInfo()->getFullPid(),period).second) continue;
+                for (const auto& window : LiveBarCalendar::windows(base,*contract,day,period))
+                    unique.insert(window.end_ns);
+            }
+            closes.assign(unique.begin(),unique.end()); calendar_day = day;
+        }
+        auto found = std::upper_bound(closes.begin(),closes.end(),after);
+        return found == closes.end() ? 0 : *found;
+    }
     void configure(const V& config, WtCtaEngine& engine, WtDtMgr& data) {
         stream = text(field(config,"stream")); history = number(field(config,"history_count"));
         if (stream.empty() || stream.size() > 36 || !history || history > 100000)

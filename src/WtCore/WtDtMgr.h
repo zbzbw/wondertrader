@@ -45,6 +45,7 @@ public:
 	void controlledLoadBar(const char* stdCode, const WTSBarStruct& bar, WTSKlinePeriod period,
 		uint32_t times, uint64_t end_ns, uint32_t history_count);
 	void controlledVisibility(uint64_t through_ns);
+	void controlledBeginShared();
 	bool controlledSharedBars() const { return _controlled_shared_bars; }
 	void controlledNotify(const char* stdCode, WTSKlinePeriod period, uint32_t times, uint64_t end_ns);
 	WTSKlineSlice* controlledSlice(const char* stdCode, WTSKlinePeriod period, uint32_t times,
