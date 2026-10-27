@@ -58,7 +58,8 @@ callbacks, UDP packets decoded by the strategy feed, latest-quote queries while
 stopped, a new recording segment, repeated stop, and write/flush failures.
 Fresh-process WtDataHelper reads check both closed segments. This synthetic
 validation does not establish exchange connectivity or full-market capacity.
-# Admission capacity
+
+## Admission capacity
 
 `recording_limit(accepted_limit)` sets an absolute bound on accepted recording
 Ticks, including earlier segments in the same process. The owner calculates this
@@ -73,4 +74,3 @@ drain accepted input. The owner persists stopped intent and calls the existing
 stop/drain operation. Increasing the limit does not clear exhaustion while the
 writer remains active. A completed stop followed by an explicit start is required.
 The additional result byte occupies reserved space; the result size is unchanged.
-
