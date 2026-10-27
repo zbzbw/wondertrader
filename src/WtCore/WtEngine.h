@@ -84,6 +84,7 @@ public:
 	WtEngine();
 
 	bool controlled() const { return _controlled; }
+	bool shared_bars() const;
 	uint64_t controlled_time() const { return _controlled_time; }
 	void set_controlled_time(uint64_t event_ms) { _controlled_time = event_ms; }
 
