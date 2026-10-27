@@ -83,7 +83,19 @@ def run_shared(dll, call, context, restore):
         snapshot = call("snapshot")["result"]
         if seq in (1,2,3,4,7): Path(f"checkpoint-{seq}.json").write_text(snapshot,encoding="utf-8")
     assert callbacks == [[code,"m60" if f=="1h" else "m5"] for code,f in bindings["series"]][before_callbacks:]
+    # No subsequent Tick: an empty final interval still closes the session.
+    end = (origin + 6 * 3_600_000) * 1_000_000
+    empty = [dict(instrument_id=code, frequency=f, interval=None, tail=coverage,
+                  input_status=dict(input=[True, True, True, str(end)], processed_through_ns=str(end)))
+             for code, f in bindings["series"]]
+    for seq, document in ((10, dict(action="load", entries=empty)), (11, dict(action="finish"))):
+        meta = dict(sequence=seq, event_ms=end // 1_000_000 + 2000, date=20260909,
+                    time=150002000, trading_day=20260909, received_at=f"synthetic:{seq}",
+                    kind="market_bar", market_bar=dict(stream="shared-test", through_ns=str(end), **document))
+        result = call("step", encoded(meta), None, None)
+        assert result["paper"]["balance"]["cash"] == "99996.00"
+    assert result["stopping"]
     final = json.loads(call("snapshot")["result"])
     assert final["version"]==2 and final["paper_sequence"]==3
-    assert final["shared_bars"]["completed"]==str(through)
+    assert final["shared_bars"]["completed"]==str(end)
     write("next-cut.json",{k:final[k] for k in ("paper","engine","sequence","event_ms","received_at","source_ns","paper_sequence","shared_bars")})

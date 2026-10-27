@@ -181,3 +181,11 @@ if __name__ == "__main__":
             subprocess.run(command + [str(output / "restored"), scenario, str(output / "original/checkpoint.json")], check=True, timeout=30)
             assert (output / "original/next-cut.json").read_bytes() == (output / "restored/next-cut.json").read_bytes()
             print(scenario, "restored next native cut equals uninterrupted execution")
+            legacy = json.loads((output / "original/checkpoint.json").read_text())
+            legacy["version"] = 1
+            for key in ("paper_sequence", "source_ns", "shared_bars"):
+                del legacy[key]
+            legacy_path = output / "legacy-v1.json"
+            legacy_path.write_text(json.dumps(legacy), encoding="utf-8")
+            subprocess.run(command + [str(output / "legacy"), scenario, str(legacy_path)], check=True, timeout=30)
+            assert (output / "original/next-cut.json").read_bytes() == (output / "legacy/next-cut.json").read_bytes()
