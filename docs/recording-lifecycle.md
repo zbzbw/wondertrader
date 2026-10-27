@@ -58,3 +58,19 @@ callbacks, UDP packets decoded by the strategy feed, latest-quote queries while
 stopped, a new recording segment, repeated stop, and write/flush failures.
 Fresh-process WtDataHelper reads check both closed segments. This synthetic
 validation does not establish exchange connectivity or full-market capacity.
+
+## Admission capacity
+
+`recording_limit(accepted_limit)` sets an absolute bound on accepted recording
+Ticks, including earlier segments in the same process. The owner calculates this
+bound after reserving active blocks, initial per-contract allocation, compressed
+close output, state and pending accepted input against its registered cache budget
+and actual free volume. The native Tick path checks the bound before writer
+acceptance, after shared latest-value updates and broadcasting.
+
+On exhaustion it accepts no further recording input and reports
+`capacity_exhausted` in `WtRecordingResult`, while leaving the writer available to
+drain accepted input. The owner persists stopped intent and calls the existing
+stop/drain operation. Increasing the limit does not clear exhaustion while the
+writer remains active. A completed stop followed by an explicit start is required.
+The additional result byte occupies reserved space; the result size is unchanged.
