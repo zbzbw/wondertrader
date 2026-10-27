@@ -14,6 +14,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <string>
 #include <thread>
 
@@ -333,4 +334,126 @@ TEST(test_writer_unit_fact, history_file_failure_never_publishes_completion)
 	writer->stopAndDrain(stop);
 	destroy(writer);
 	DLLHelper::free_library(library);
+}
+
+namespace
+{
+class RawCloseWriter : public testing::Test
+{
+protected:
+	void SetUp() override
+	{
+		const char* path = std::getenv("BWT_TEST_WRITER_DLL");
+		ASSERT_NE(path, nullptr);
+		library = DLLHelper::load_library(path);
+		ASSERT_NE(library, nullptr);
+		auto create = (FuncCreateWriter)DLLHelper::get_symbol(library, "createWriter");
+		destroy = (FuncDeleteWriter)DLLHelper::get_symbol(library, "deleteWriter");
+		ASSERT_NE(create, nullptr);
+		ASSERT_NE(destroy, nullptr);
+		root = std::filesystem::temp_directory_path() / ("zbw169-raw-" + std::to_string(
+			std::chrono::steady_clock::now().time_since_epoch().count()));
+		std::filesystem::create_directories(root);
+#ifdef _WIN32
+		_putenv_s("BWT_DATAKIT_RUN_ID", "raw-close-test");
+		_putenv_s("BWT_DATAKIT_SUBSCRIPTION_IDENTITY", "SHFE.cu2609,CFFEX.IF2609");
+#else
+		setenv("BWT_DATAKIT_RUN_ID", "raw-close-test", 1);
+		setenv("BWT_DATAKIT_SUBSCRIPTION_IDENTITY", "SHFE.cu2609,CFFEX.IF2609", 1);
+#endif
+		writer = create();
+		WTSVariant* config = writerConfig(root);
+		ASSERT_TRUE(writer->init(config, &sink));
+		config->release();
+	}
+	void TearDown() override
+	{
+		if (writer)
+		{
+			DataWriterStopResult result;
+			writer->stopAndDrain(result);
+			destroy(writer);
+		}
+		if (library) DLLHelper::free_library(library);
+	}
+	void append(const char* exchange, uint32_t count)
+	{
+		for (uint32_t i = 0; i < count; ++i)
+		{
+			WTSTickData* value = tick(sink, exchange, i);
+			ASSERT_TRUE(writer->writeTick(value, 0));
+			value->release();
+		}
+	}
+	DllHandle library = nullptr;
+	FuncDeleteWriter destroy = nullptr;
+	IDataWriter* writer = nullptr;
+	UnitFactSink sink;
+	std::filesystem::path root;
+};
+}
+
+TEST_F(RawCloseWriter, stop_closes_raw_without_advancing_daily_completion)
+{
+	append("SHFE", 3);
+	append("CFFEX", 2);
+	DataWriterStopResult result;
+	ASSERT_TRUE(writer->stopAndDrain(result));
+	EXPECT_EQ(result.received_offset, 5U);
+	EXPECT_EQ(result.persisted_offset, 5U);
+	EXPECT_TRUE(result.checkpoint_persisted);
+	EXPECT_TRUE(std::filesystem::exists(root / "raw/ticks/20260915/SHFE/cu2609.dsb"));
+	EXPECT_TRUE(std::filesystem::exists(root / "raw/ticks/20260915/CFFEX/IF2609.dsb"));
+	EXPECT_FALSE(std::filesystem::exists(root / "marker.ini"));
+	EXPECT_FALSE(std::filesystem::exists(root / "recording/units"));
+	std::string document;
+	StdFile::read_file_content((root / "recording/closed.json").string().c_str(), document);
+	EXPECT_NE(document.find("\"complete_day\":false"), std::string::npos);
+	EXPECT_NE(document.find("\"rows\":3"), std::string::npos);
+	EXPECT_NE(document.find("\"rows\":2"), std::string::npos);
+}
+
+TEST_F(RawCloseWriter, daily_close_next_to_stop_emits_each_unit_once)
+{
+	append("SHFE", 3);
+	append("CFFEX", 2);
+	writer->beginSessionClose("SHFE");
+	writer->transHisData("SHFE");
+	auto daily = root / "recording/units/raw-close-test/20260915/SHFE/cu2609.json";
+	for (uint32_t i = 0; i < 500 && !std::filesystem::exists(daily); ++i)
+		std::this_thread::sleep_for(std::chrono::milliseconds(10));
+	ASSERT_TRUE(std::filesystem::exists(daily));
+	DataWriterStopResult result;
+	ASSERT_TRUE(writer->stopAndDrain(result));
+	EXPECT_TRUE(std::filesystem::exists(root / "his/ticks/SHFE/20260915/cu2609.dsb"));
+	EXPECT_FALSE(std::filesystem::exists(root / "raw/ticks/20260915/SHFE/cu2609.dsb"));
+	EXPECT_TRUE(std::filesystem::exists(root / "raw/ticks/20260915/CFFEX/IF2609.dsb"));
+}
+
+TEST_F(RawCloseWriter, failed_raw_output_preserves_dmb_and_has_no_close_record)
+{
+	append("SHFE", 3);
+	std::ofstream blocked((root / "raw").string());
+	blocked << "blocked raw directory";
+	blocked.close();
+	DataWriterStopResult result;
+	EXPECT_FALSE(writer->stopAndDrain(result));
+	EXPECT_FALSE(result.checkpoint_persisted);
+	EXPECT_FALSE(std::filesystem::exists(root / "recording/closed.json"));
+	EXPECT_TRUE(std::filesystem::exists(root / "rt/ticks/SHFE/cu2609.dmb"));
+}
+
+TEST_F(RawCloseWriter, failed_close_record_keeps_raw_file_unpublished)
+{
+	append("SHFE", 3);
+	std::filesystem::create_directories(root / "recording/closed.json");
+	std::ofstream blocked((root / "recording/closed.json/blocked").string());
+	blocked << "blocked close record";
+	blocked.close();
+	DataWriterStopResult result;
+	EXPECT_FALSE(writer->stopAndDrain(result));
+	EXPECT_FALSE(result.checkpoint_persisted);
+	EXPECT_FALSE(std::filesystem::is_regular_file(root / "recording/closed.json"));
+	EXPECT_TRUE(std::filesystem::exists(root / "raw/ticks/20260915/SHFE/cu2609.dsb"));
+	EXPECT_TRUE(std::filesystem::exists(root / "rt/ticks/SHFE/cu2609.dmb"));
 }

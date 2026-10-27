@@ -23,6 +23,28 @@ the same result. Starting creates a new writer under `segments/<number>/`, retai
 previous files and dumpers. A failed drain requires maintenance before another start.
 Session processing can advance while persistence is stopped or failed.
 
+`recording_instruments(comma_separated_codes)` changes the writer's explicit
+instrument set after a successful stop. Codes use the existing full contract
+names and must belong to current parser subscriptions. A running writer rejects
+changes. An empty string selects no instruments. The filter runs after latest
+quote updates and broadcasting, before writer acceptance; excluded ticks do not
+increase writer offsets. Parser subscriptions remain owned by market reception.
+
+Stopping also compresses remaining accepted Tick rows to immutable
+`raw/ticks/<trading-date>/<exchange>/<code>.dsb` files inside that segment.
+`recording/closed.json` appears only after all raw files and the close record are
+durable. It reports per-file rows, receive times in UTC Unix ns, and writer
+offsets. These files are readable before market close. The close record has
+`complete_day=false`; it does not advance session markers or daily completion.
+Units already emitted by a daily close are omitted from stop-time output.
+The existing daily unit facts remain available separately.
+
+DMB files remain available after stopping. A later process starts a fresh
+segment when a previous close record exists, so stopped DMBs are never reopened
+for append. A failed compression or close-record write returns failed stop
+evidence, retains original data, and publishes no successful close record.
+Reception and broadcasting continue after that failure.
+
 `WtRecordingResult` reports `recording`, `failed`, `writer_drained`,
 `checkpoint_persisted`, `received_offset`, `accepted_offset`, `persisted_offset`,
 and `segment`. Reception counts valid shared ticks; writer offsets count accepted
